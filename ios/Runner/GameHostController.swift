@@ -1,4 +1,3 @@
-import AVFoundation
 import Flutter
 import Foundation
 import GardendlessBridge
@@ -94,7 +93,6 @@ final class GameHostController: UIViewController,
 
   private var webView: WKWebView!
   private var scriptBridge: ScriptMessageBridge!
-  private var nativeAudioHost: NativeAudioHost!
   private var navigationPolicy: NavigationPolicy!
   private var pendingExport: (id: String, handle: String, file: URL, picker: UIDocumentPickerViewController)?
   private var activePicker: UIDocumentPickerViewController?
@@ -198,12 +196,6 @@ final class GameHostController: UIViewController,
       contentWorld: .page,
       name: ScriptMessageBridge.name
     )
-    nativeAudioHost = NativeAudioHost(sandbox: sandbox, webView: webView)
-    contentController.add(
-      nativeAudioHost,
-      contentWorld: .page,
-      name: NativeAudioHost.name
-    )
 
     navigationPolicy = NavigationPolicy(session: session)
     navigationPolicy.owner = self
@@ -258,7 +250,6 @@ final class GameHostController: UIViewController,
             self.playedTime += Date().timeIntervalSince(since)
             self.activeSince = nil
           }
-          self.nativeAudioHost.setSceneActive(active)
           self.webView.evaluateJavaScript(
             "window.__gardendlessSetSceneActive&&window.__gardendlessSetSceneActive(\(active))"
           )
@@ -743,11 +734,6 @@ final class GameHostController: UIViewController,
       forName: ScriptMessageBridge.name,
       contentWorld: .page
     )
-    webView.configuration.userContentController.removeScriptMessageHandler(
-      forName: NativeAudioHost.name,
-      contentWorld: .page
-    )
-    nativeAudioHost.destroy()
     scriptBridge.destroy()
     webView.stopLoading()
     webView.navigationDelegate = nil
@@ -915,127 +901,6 @@ private final class NavigationPolicy: NSObject, WKNavigationDelegate {
     guard let host = host?.lowercased() else { return false }
     return session.allowedRemoteHosts.contains {
       host == $0 || host.hasSuffix(".\($0)")
-    }
-  }
-}
-
-
-private final class NativeAudioHost: NSObject, WKScriptMessageHandler, AVAudioPlayerDelegate {
-  static let name = "gardendlessNativeAudio"
-
-  private let sandbox: PathSandbox
-  private weak var webView: WKWebView?
-  private var players: [Int: AVAudioPlayer] = [:]
-  private var playerOrder: [Int] = []
-  private var pausedIds: Set<Int> = []
-  private let maxPlayers = 8
-
-  init(sandbox: PathSandbox, webView: WKWebView) {
-    self.sandbox = sandbox
-    self.webView = webView
-    super.init()
-    try? AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default, options: [.mixWithOthers])
-    try? AVAudioSession.sharedInstance().setActive(true)
-  }
-
-  func userContentController(
-    _ userContentController: WKUserContentController,
-    didReceive message: WKScriptMessage
-  ) {
-    guard let body = message.body as? [String: Any],
-          let action = body["action"] as? String,
-          let id = body["id"] as? Int else {
-      return
-    }
-    switch action {
-    case "play":
-      guard let relPath = body["path"] as? String,
-            let fileURL = sandbox.resolve(relPath) else {
-        notifyEnded(id)
-        return
-      }
-      let loop = (body["loop"] as? Bool) ?? false
-      let volume = (body["volume"] as? NSNumber)?.floatValue ?? 1.0
-      let offset = (body["offset"] as? NSNumber)?.doubleValue ?? 0.0
-      play(id: id, url: fileURL, loop: loop, volume: volume, offset: offset)
-    case "stop":
-      stop(id: id)
-    default:
-      break
-    }
-  }
-
-  private func play(id: Int, url: URL, loop: Bool, volume: Float, offset: Double) {
-    stop(id: id)
-    while playerOrder.count >= maxPlayers {
-      let victimId = playerOrder.first(where: { players[$0]?.numberOfLoops == 0 }) ?? playerOrder[0]
-      stop(id: victimId)
-    }
-    guard let player = try? AVAudioPlayer(contentsOf: url) else {
-      notifyEnded(id)
-      return
-    }
-    player.delegate = self
-    player.numberOfLoops = loop ? -1 : 0
-    player.volume = max(0.0, min(1.0, volume))
-    if offset > 0 && offset < player.duration {
-      player.currentTime = offset
-    }
-    player.prepareToPlay()
-    if player.play() {
-      players[id] = player
-      playerOrder.append(id)
-    } else {
-      notifyEnded(id)
-    }
-  }
-
-  private func stop(id: Int) {
-    pausedIds.remove(id)
-    playerOrder.removeAll { $0 == id }
-    if let player = players.removeValue(forKey: id) {
-      player.delegate = nil
-      player.stop()
-    }
-  }
-
-  func setSceneActive(_ active: Bool) {
-    if !active {
-      for (id, player) in players where player.isPlaying {
-        player.pause()
-        pausedIds.insert(id)
-      }
-    } else {
-      try? AVAudioSession.sharedInstance().setCategory(.ambient, mode: .default, options: [.mixWithOthers])
-      try? AVAudioSession.sharedInstance().setActive(true)
-      for id in pausedIds {
-        players[id]?.play()
-      }
-      pausedIds.removeAll()
-    }
-  }
-
-  func destroy() {
-    pausedIds.removeAll()
-    playerOrder.removeAll()
-    for (_, player) in players {
-      player.delegate = nil
-      player.stop()
-    }
-    players.removeAll()
-  }
-
-  func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-    guard let id = players.first(where: { $0.value === player })?.key else { return }
-    stop(id: id)
-    notifyEnded(id)
-  }
-
-  private func notifyEnded(_ id: Int) {
-    DispatchQueue.main.async { [weak self] in
-      self?.webView?.evaluateJavaScript(
-        "window.__gardendlessOnNativeAudioEnded&&window.__gardendlessOnNativeAudioEnded(\(id))"
-      )
     }
   }
 }
