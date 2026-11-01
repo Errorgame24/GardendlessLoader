@@ -282,6 +282,7 @@ jobs:
 
   harmonyos:
     needs: quality
+    if: ${{ secrets.OHOS_COMMANDLINE_TOOLS_URL != '' }}
     outputs:
       version: ${{ steps.harmonyos_artifact.outputs.version }}
       sha256: ${{ steps.harmonyos_artifact.outputs.sha256 }}
@@ -573,6 +574,8 @@ jobs:
               abi = os.environ[f'{platform}_HOST_ABI']
               digest = os.environ[f'{platform}_SHA256']
               rows.append(f'| {platform} | {result} | {actual} | {abi} | {digest} |')
+              if platform == 'HARMONYOS' and result == 'skipped':
+                  continue
               if result != 'success' or actual != version or abi != '1' or not re.fullmatch(r'[a-f0-9]{64}', digest):
                   errors.append(f'{platform} is missing a successful matching artifact')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:

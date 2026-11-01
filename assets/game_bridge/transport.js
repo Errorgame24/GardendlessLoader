@@ -209,7 +209,7 @@
     // No native events exist; the handler's callback id doubles as the event id,
     // so unregisterListener(event, id) removes that same handler.
     if (command === "plugin:event|listen") return args.handler;
-    if (command === "plugin:drpc|is_running" || command === "plugin:deep-link|is_registered" || command === "plugin:window|is_maximized") return false;
+    if (command === "plugin:drpc|is_running" || command === "plugin:deep-link|is_registered" || command === "plugin:window|is_maximized" || command === "plugin:window|is_fullscreen") return false;
     if (command === "plugin:deep-link|get_current") return [];
     // The loader has no GP-Next cloud save service, so no restore journal exists.
     if (command === "cloud_journal_read") return null;
