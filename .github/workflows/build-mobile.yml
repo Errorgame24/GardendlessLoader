@@ -282,7 +282,7 @@ jobs:
 
   harmonyos:
     needs: quality
-    if: ${{ secrets.OHOS_COMMANDLINE_TOOLS_URL != '' }}
+    if: false
     outputs:
       version: ${{ steps.harmonyos_artifact.outputs.version }}
       sha256: ${{ steps.harmonyos_artifact.outputs.sha256 }}
