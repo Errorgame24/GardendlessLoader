@@ -1,12 +1,5 @@
 (function () {
   "use strict";
-  // 1. Scene lifecycle management + Native iOS Audio Offloading & WebContent Memory Protection:
-  //    - Offloads >64KB .m4a/.mp3/.wav/.aac tracks to iOS Native AVAudioPlayer (gardendlessNativeAudio)
-  //      running in the main Runner process (5GB+ RAM with increased-memory-limit), using 0 WebView RAM!
-  //    - Streams >64KB .ogg tracks via bounded 3-channel HTMLMediaElement pool (0 PCM RAM)
-  //    - Lowers default WebAudio SFX sampleRate to 16000Hz (saves 67% PCM memory)
-  //    - Caps short SFX PCM memory at 75MB using a 0.1s singleton silent AudioBuffer
-  //    - Releases duplicate CPU bitmap cache 3s after >=512px textures upload to WebGL GPU
   const Base = window.AudioContext || window.webkitAudioContext;
   const Media = window.HTMLMediaElement;
   if (!Base || !Media) return;
@@ -22,8 +15,8 @@
   let waiting = [];
 
   const TARGET_SAMPLE_RATE = 16000;
-  const OFFLOAD_AUDIO_OVER_BYTES = 64 * 1024;
-  const MAX_TOTAL_PCM_BYTES = 75 * 1024 * 1024;
+  const OFFLOAD_AUDIO_OVER_BYTES = 32 * 1024;
+  const MAX_TOTAL_PCM_BYTES = 30 * 1024 * 1024;
   let totalPcmBytes = 0;
 
   const nativeAudioHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.gardendlessNativeAudio;
@@ -127,7 +120,7 @@
     pausedMedia.clear();
   };
 
-  // --- Track XHR / fetch audio URLs so large audio can be offloaded to Swift NativeAudioHost ---
+  // --- Track XHR / fetch audio URLs ---
   if (typeof window.XMLHttpRequest === "function") {
     const XHR = window.XMLHttpRequest;
     const origOpen = XHR.prototype.open;
@@ -169,11 +162,11 @@
     };
   }
 
-  // --- Bounded HTML5 <audio> fallback pool for .ogg or inline Blob tracks ---
+  // --- Bounded HTML5 <audio> fallback pool ---
   const bgmPool = [];
   const MAX_BGM_STREAMS = 3;
   const blobUrlRing = [];
-  const MAX_BLOB_URLS = 6;
+  const MAX_BLOB_URLS = 4;
 
   function registerBlobUrl(url) {
     if (!url) return null;
@@ -239,7 +232,6 @@
           }
         };
 
-        // Route 1: Offload to iOS Native AVAudioPlayer in Runner host process (0 WebView RAM!)
         if (buf.__gardendlessNativePath && nativeAudioHandler) {
           const streamId = nextNativeStreamId++;
           self.__gardendlessNativeStreamId = streamId;
@@ -259,11 +251,11 @@
           nativeCallbacks.delete(streamId);
         }
 
-        // Route 2: Stream via HTMLMediaElement (<audio>) for .ogg or custom Blobs
         let url = buf.__gardendlessStreamUrl;
         if (!url && buf.__gardendlessBlobBytes && typeof Blob !== "undefined" && typeof URL !== "undefined") {
           try {
             url = registerBlobUrl(URL.createObjectURL(new Blob([buf.__gardendlessBlobBytes])));
+            buf.__gardendlessBlobBytes = null;
             buf.__gardendlessStreamUrl = url;
           } catch (_) {}
         }
@@ -321,7 +313,7 @@
     };
   }
 
-  // --- Intercept decodeAudioData for Native/Stream offloading & 75MB SFX memory ceiling ---
+  // --- Intercept decodeAudioData ---
   if (typeof Base.prototype.decodeAudioData === "function") {
     const origDecode = Base.prototype.decodeAudioData;
 
@@ -405,39 +397,98 @@
     };
   }
 
-  // --- Auto-release CPU bitmap cache 3s after large (>=512px) textures upload to WebGL ---
-  if (typeof window.HTMLImageElement === "function") {
-    function scheduleImageCpuRelease(img) {
-      if (!img || !(img instanceof window.HTMLImageElement) || img.__gardendlessCpuReleased) return;
-      const w = img.naturalWidth || img.width || 0;
-      const h = img.naturalHeight || img.height || 0;
-      if (w < 512 && h < 512) return;
-      img.__gardendlessCpuReleased = true;
-      setTimeout(function () {
-        try {
-          Object.defineProperty(img, "width", { value: w, configurable: true });
-          Object.defineProperty(img, "height", { value: h, configurable: true });
-          Object.defineProperty(img, "naturalWidth", { value: w, configurable: true });
-          Object.defineProperty(img, "naturalHeight", { value: h, configurable: true });
-          img.removeAttribute("src");
-        } catch (_) {}
-      }, 3000);
+  // --- CRITICAL TEXTURE MEMORY OPTIMIZER (Fixes Cocos 3.8 ImageBitmap & WebGL2 RGBA8 OOM!) ---
+  // 1. Throttle window.createImageBitmap to max 2 concurrent decodes to prevent 600MB+ parallel burst spikes
+  if (typeof window.createImageBitmap === "function") {
+    const origCreateImageBitmap = window.createImageBitmap;
+    const bitmapQueue = [];
+    let activeBitmaps = 0;
+    const MAX_CONCURRENT_BITMAPS = 2;
+
+    function pumpBitmapQueue() {
+      while (activeBitmaps < MAX_CONCURRENT_BITMAPS && bitmapQueue.length > 0) {
+        const task = bitmapQueue.shift();
+        activeBitmaps++;
+        Promise.resolve()
+          .then(function () { return origCreateImageBitmap.apply(window, task.args); })
+          .then(
+            function (bmp) { activeBitmaps--; pumpBitmapQueue(); task.resolve(bmp); },
+            function (err) { activeBitmaps--; pumpBitmapQueue(); task.reject(err); }
+          );
+      }
     }
 
-    [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (GLCtor) {
-      if (!GLCtor || !GLCtor.prototype) return;
-      ["texImage2D", "texSubImage2D"].forEach(function (method) {
-        const origMethod = GLCtor.prototype[method];
-        if (typeof origMethod !== "function") return;
-        GLCtor.prototype[method] = function () {
-          const res = origMethod.apply(this, arguments);
-          const lastArg = arguments[arguments.length - 1];
-          if (lastArg instanceof window.HTMLImageElement) {
-            scheduleImageCpuRelease(lastArg);
-          }
-          return res;
-        };
+    window.createImageBitmap = function () {
+      const args = Array.prototype.slice.call(arguments);
+      return new Promise(function (resolve, reject) {
+        bitmapQueue.push({ args: args, resolve: resolve, reject: reject });
+        pumpBitmapQueue();
       });
-    });
+    };
   }
+
+  // 2. Immediately close() ImageBitmap and strip HTMLImageElement.src after WebGL upload,
+  //    AND convert WebGL2 texStorage2D from 32-bit RGBA8 (0x8058) to 16-bit RGBA4 (0x8056) to halve GPU VRAM!
+  function releaseTextureSourceCpuMemory(source) {
+    if (!source || source.__gardendlessCpuReleased) return;
+    // Case A: ImageBitmap (used by Cocos Creator 3.8 on iOS!)
+    if (typeof source.close === "function") {
+      const w = source.width || 0;
+      const h = source.height || 0;
+      if (w < 128 && h < 128) return;
+      source.__gardendlessCpuReleased = true;
+      setTimeout(function () {
+        try {
+          Object.defineProperty(source, "width", { value: w, configurable: true });
+          Object.defineProperty(source, "height", { value: h, configurable: true });
+          source.close();
+        } catch (_) {}
+      }, 150);
+      return;
+    }
+    // Case B: HTMLImageElement
+    if (typeof window.HTMLImageElement === "function" && source instanceof window.HTMLImageElement) {
+      const w = source.naturalWidth || source.width || 0;
+      const h = source.naturalHeight || source.height || 0;
+      if (w < 256 && h < 256) return;
+      source.__gardendlessCpuReleased = true;
+      setTimeout(function () {
+        try {
+          Object.defineProperty(source, "width", { value: w, configurable: true });
+          Object.defineProperty(source, "height", { value: h, configurable: true });
+          Object.defineProperty(source, "naturalWidth", { value: w, configurable: true });
+          Object.defineProperty(source, "naturalHeight", { value: h, configurable: true });
+          source.removeAttribute("src");
+        } catch (_) {}
+      }, 500);
+    }
+  }
+
+  [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (GLCtor) {
+    if (!GLCtor || !GLCtor.prototype) return;
+
+    // Halve GPU VRAM in WebGL2 by converting 32-bit RGBA8 (0x8058) to 16-bit RGBA4 (0x8056) for textures >= 256px
+    if (typeof GLCtor.prototype.texStorage2D === "function") {
+      const origTexStorage2D = GLCtor.prototype.texStorage2D;
+      GLCtor.prototype.texStorage2D = function (target, levels, internalformat, width, height) {
+        if (internalformat === 0x8058 && (width >= 256 || height >= 256)) {
+          internalformat = 0x8056; // GL_RGBA4 (2 bytes/pixel instead of 4 bytes/pixel -> 50% GPU VRAM saved!)
+        }
+        return origTexStorage2D.call(this, target, levels, internalformat, width, height);
+      };
+    }
+
+    ["texImage2D", "texSubImage2D"].forEach(function (method) {
+      const origMethod = GLCtor.prototype[method];
+      if (typeof origMethod !== "function") return;
+      GLCtor.prototype[method] = function () {
+        const lastArg = arguments[arguments.length - 1];
+        const res = origMethod.apply(this, arguments);
+        if (lastArg && typeof lastArg === "object") {
+          releaseTextureSourceCpuMemory(lastArg);
+        }
+        return res;
+      };
+    });
+  });
 })();

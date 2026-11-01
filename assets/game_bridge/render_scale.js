@@ -18,7 +18,7 @@
       if (typeof scale === "number" && scale > 0) {
         return ratio * scale;
       }
-      return Math.min(ratio, 1.5);
+      return Math.min(ratio, 1.25);
     }
   });
 })();
