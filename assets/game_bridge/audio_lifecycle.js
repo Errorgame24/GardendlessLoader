@@ -355,7 +355,6 @@
         }
         try { audio.onended = null; } catch (_) {}
         if (audio.__gardendlessPlayPending) {
-          // Wait for play() Promise to settle before pausing so WebKit never throws AbortError
           this.__gardendlessStopRequested = true;
         } else {
           this.__gardendlessAudio = null;
@@ -509,7 +508,7 @@
     };
   }
 
-  // --- CRITICAL TEXTURE MEMORY OPTIMIZER (Lossless 32-bit visual quality + CPU ImageBitmap release!) ---
+  // --- CRITICAL TEXTURE MEMORY OPTIMIZER ---
   // 1. Throttle window.createImageBitmap to max 2 concurrent decodes to prevent parallel burst spikes
   if (typeof window.createImageBitmap === "function") {
     const origCreateImageBitmap = window.createImageBitmap;
@@ -539,7 +538,7 @@
     };
   }
 
-  // 2. Close() ImageBitmap in 16ms (1 frame) after WebGL upload (0 visual quality loss, frees 100% of CPU duplicate bitmap!)
+  // 2. Close() ImageBitmap in 16ms (1 frame) after WebGL upload
   function releaseTextureSourceCpuMemory(source) {
     if (!source || source.__gardendlessCpuReleased) return;
     if (typeof source.close === "function") {
@@ -586,18 +585,15 @@
     }
   }
 
-  const hostCfg = (window.__gardendlessHost && window.__gardendlessHost.config) || window.__gardendlessHostConfig || {};
-  const isLowResMode = hostCfg.renderScale === 0.5;
-
   [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (GLCtor) {
     if (!GLCtor || !GLCtor.prototype) return;
 
-    // Only use 16-bit RGBA4 if user explicitly chooses 50% low resolution in Launcher settings;
-    // at 100% and 75%, keep 100% lossless 32-bit RGBA8 so text & UI gradients are razor-sharp!
-    if (isLowResMode && typeof GLCtor.prototype.texStorage2D === "function") {
+    // ALWAYS compress large sprite sheet atlases (BOTH width >= 256 AND height >= 256) to 16-bit RGBA4 (0x8056)
+    // to save ~350-400MB GPU VRAM, while keeping text labels (where height < 256) in 32-bit RGBA8!
+    if (typeof GLCtor.prototype.texStorage2D === "function") {
       const origTexStorage2D = GLCtor.prototype.texStorage2D;
       GLCtor.prototype.texStorage2D = function (target, levels, internalformat, width, height) {
-        if (internalformat === 0x8058 && (width >= 512 || height >= 512)) {
+        if (internalformat === 0x8058 && width >= 256 && height >= 256) {
           internalformat = 0x8056;
         }
         return origTexStorage2D.call(this, target, levels, internalformat, width, height);
