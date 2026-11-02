@@ -7,7 +7,7 @@
     if (!node) {
       node = document.createElement("div");
       node.id = id;
-      node.textContent = "GardendlessLoader";
+      node.textContent = "present day, present time";
       Object.assign(node.style, {
         position: "fixed",
         right: "12px",
