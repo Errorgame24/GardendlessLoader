@@ -160,9 +160,9 @@
     return "audio/mpeg";
   }
 
-  // --- Protected 8-stream HTML5 <audio> pool (Looping BGM is NEVER evicted by non-looping SFX!) ---
+  // --- Protected 12-stream HTML5 <audio> pool (Looping BGM is NEVER evicted by non-looping SFX!) ---
   const streamPool = [];
-  const MAX_STREAM_ELEMENTS = 8;
+  const MAX_STREAM_ELEMENTS = 12;
   const blobUrlRing = [];
   const MAX_BLOB_URLS = 6;
 
@@ -178,20 +178,17 @@
 
   function acquireAudioStream(streamUrl, isLoop, volume) {
     let item = null;
-    // 1. Prefer an idle (paused or ended) element
     for (let i = 0; i < streamPool.length; i++) {
-      if (streamPool[i].paused || streamPool[i].ended) {
+      if ((streamPool[i].paused || streamPool[i].ended) && !streamPool[i].__gardendlessPlayPending) {
         item = streamPool[i];
         break;
       }
     }
-    // 2. Create new element if pool not full
     if (!item && streamPool.length < MAX_STREAM_ELEMENTS && typeof window.Audio === "function") {
       item = new window.Audio();
       item.preload = "auto";
       streamPool.push(item);
     }
-    // 3. If pool is full, NEVER evict a playing looping BGM unless the new request is also a looping BGM!
     if (!item && streamPool.length > 0) {
       let victimIdx = -1;
       for (let i = 0; i < streamPool.length; i++) {
@@ -282,11 +279,11 @@
         }
         if (url) {
           let initVol = computeEffectiveVolume(self);
-          // If BGM starts at gain 0 for a fade-in, start at 1.0 or follow gain ramp
           if (initVol <= 0.0001 && self.loop) initVol = 1.0;
           const audio = acquireAudioStream(url, self.loop, initVol);
           if (audio) {
             self.__gardendlessAudio = audio;
+            self.__gardendlessStopRequested = false;
             audio.addEventListener("loadedmetadata", function onMeta() {
               audio.removeEventListener("loadedmetadata", onMeta);
               if (Number.isFinite(audio.duration) && audio.duration > 0) {
@@ -323,9 +320,24 @@
                 audio.volume = currentVol;
               }
             }, 200);
+            audio.__gardendlessPlayPending = true;
             const p = Media.prototype.play.call(audio);
-            if (p && typeof p.catch === "function") {
-              p.catch(function () { setTimeout(fireEnded, 100); });
+            if (p && typeof p.then === "function") {
+              p.then(
+                function () {
+                  audio.__gardendlessPlayPending = false;
+                  if (self.__gardendlessStopRequested && self.__gardendlessAudio === audio) {
+                    self.__gardendlessAudio = null;
+                    try { nativePause.call(audio); } catch (_) {}
+                  }
+                },
+                function () {
+                  audio.__gardendlessPlayPending = false;
+                  setTimeout(fireEnded, 50);
+                }
+              );
+            } else {
+              audio.__gardendlessPlayPending = false;
             }
             return;
           }
@@ -337,15 +349,18 @@
     OrigSourceNode.prototype.stop = function () {
       if (this.__gardendlessAudio) {
         const audio = this.__gardendlessAudio;
-        this.__gardendlessAudio = null;
         if (audio.__gardendlessVolTimer) {
           clearInterval(audio.__gardendlessVolTimer);
           audio.__gardendlessVolTimer = null;
         }
-        try {
-          audio.onended = null;
-          nativePause.call(audio);
-        } catch (_) {}
+        try { audio.onended = null; } catch (_) {}
+        if (audio.__gardendlessPlayPending) {
+          // Wait for play() Promise to settle before pausing so WebKit never throws AbortError
+          this.__gardendlessStopRequested = true;
+        } else {
+          this.__gardendlessAudio = null;
+          try { nativePause.call(audio); } catch (_) {}
+        }
         if (typeof this.onended === "function") {
           try { this.onended(new Event("ended")); } catch (_) {}
         }
@@ -494,7 +509,7 @@
     };
   }
 
-  // --- CRITICAL TEXTURE MEMORY OPTIMIZER (Fixes Cocos 3.8 ImageBitmap & WebGL2 RGBA8 OOM!) ---
+  // --- CRITICAL TEXTURE MEMORY OPTIMIZER (Lossless 32-bit visual quality + CPU ImageBitmap release!) ---
   // 1. Throttle window.createImageBitmap to max 2 concurrent decodes to prevent parallel burst spikes
   if (typeof window.createImageBitmap === "function") {
     const origCreateImageBitmap = window.createImageBitmap;
@@ -524,7 +539,7 @@
     };
   }
 
-  // 2. Close() ImageBitmap in 16ms (1 frame) after WebGL upload, and convert WebGL2 RGBA8 -> RGBA4 (16-bit)
+  // 2. Close() ImageBitmap in 16ms (1 frame) after WebGL upload (0 visual quality loss, frees 100% of CPU duplicate bitmap!)
   function releaseTextureSourceCpuMemory(source) {
     if (!source || source.__gardendlessCpuReleased) return;
     if (typeof source.close === "function") {
@@ -571,15 +586,19 @@
     }
   }
 
+  const hostCfg = (window.__gardendlessHost && window.__gardendlessHost.config) || window.__gardendlessHostConfig || {};
+  const isLowResMode = hostCfg.renderScale === 0.5;
+
   [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (GLCtor) {
     if (!GLCtor || !GLCtor.prototype) return;
 
-    // Halve GPU VRAM in WebGL2 by converting 32-bit RGBA8 (0x8058) to 16-bit RGBA4 (0x8056) for textures >= 64px
-    if (typeof GLCtor.prototype.texStorage2D === "function") {
+    // Only use 16-bit RGBA4 if user explicitly chooses 50% low resolution in Launcher settings;
+    // at 100% and 75%, keep 100% lossless 32-bit RGBA8 so text & UI gradients are razor-sharp!
+    if (isLowResMode && typeof GLCtor.prototype.texStorage2D === "function") {
       const origTexStorage2D = GLCtor.prototype.texStorage2D;
       GLCtor.prototype.texStorage2D = function (target, levels, internalformat, width, height) {
-        if (internalformat === 0x8058 && (width >= 64 || height >= 64)) {
-          internalformat = 0x8056; // GL_RGBA4 (2 bytes/pixel instead of 4 bytes/pixel -> 50% GPU VRAM saved!)
+        if (internalformat === 0x8058 && (width >= 512 || height >= 512)) {
+          internalformat = 0x8056;
         }
         return origTexStorage2D.call(this, target, levels, internalformat, width, height);
       };
