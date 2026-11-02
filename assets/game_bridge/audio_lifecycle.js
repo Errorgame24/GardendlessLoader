@@ -11,13 +11,13 @@
   const media = new Set();
   const suspendedContexts = new Set();
   const pausedMedia = new Set();
+  const trackedGlContexts = new Set();
   let active = true;
   let waiting = [];
 
   const TARGET_SAMPLE_RATE = 16000;
-  const BGM_SAMPLE_RATE = 12000;
-  const BGM_DURATION_THRESHOLD_SEC = 8.0;
-  const MAX_TOTAL_PCM_BYTES = 120 * 1024 * 1024;
+  const STREAM_AUDIO_OVER_BYTES = 64 * 1024;
+  const MAX_TOTAL_PCM_BYTES = 30 * 1024 * 1024;
   const MAX_CONCURRENT_AUDIO_DECODES = 4;
   let totalPcmBytes = 0;
 
@@ -83,70 +83,312 @@
     pausedMedia.clear();
   };
 
-  // --- Native WebAudio Mono Downmixer & BGM Compressor (83%-87.5% PCM RAM Reduction, 100% Full Audio!) ---
+  // --- Track XHR & fetch audio URLs (including synchronous XHR.response getter!) ---
+  if (typeof window.XMLHttpRequest === "function") {
+    const XHR = window.XMLHttpRequest;
+    const origOpen = XHR.prototype.open;
+    const respDesc = Object.getOwnPropertyDescriptor(XHR.prototype, "response");
+
+    XHR.prototype.open = function (method, url) {
+      this.__gardendlessReqUrl = typeof url === "string" ? url : String(url || "");
+      this.addEventListener("readystatechange", function () {
+        if (this.readyState === 4) {
+          try {
+            if ((!this.responseType || this.responseType === "arraybuffer") && this.response instanceof ArrayBuffer && this.__gardendlessReqUrl) {
+              this.response.__gardendlessAudioUrl = this.responseURL || this.__gardendlessReqUrl;
+            }
+          } catch (_) {}
+        }
+      });
+      return origOpen.apply(this, arguments);
+    };
+
+    if (respDesc && typeof respDesc.get === "function") {
+      Object.defineProperty(XHR.prototype, "response", {
+        configurable: true,
+        enumerable: respDesc.enumerable,
+        get: function () {
+          const val = respDesc.get.call(this);
+          try {
+            if (val instanceof ArrayBuffer && !val.__gardendlessAudioUrl && (this.responseURL || this.__gardendlessReqUrl)) {
+              val.__gardendlessAudioUrl = this.responseURL || this.__gardendlessReqUrl;
+            }
+          } catch (_) {}
+          return val;
+        }
+      });
+    }
+  }
+
+  if (typeof window.fetch === "function") {
+    const origFetch = window.fetch;
+    window.fetch = function (input) {
+      const reqUrl = typeof input === "string" ? input : (input && input.url ? input.url : "");
+      return origFetch.apply(this, arguments).then(function (response) {
+        if (reqUrl && response && typeof response.arrayBuffer === "function") {
+          const origAb = response.arrayBuffer;
+          response.arrayBuffer = function () {
+            return origAb.apply(this, arguments).then(function (ab) {
+              if (ab instanceof ArrayBuffer) {
+                ab.__gardendlessAudioUrl = response.url || reqUrl;
+              }
+              return ab;
+            });
+          };
+        }
+        return response;
+      });
+    };
+  }
+
+  function sniffAudioMime(arrayBuffer) {
+    try {
+      const u = new Uint8Array(arrayBuffer, 0, Math.min(16, arrayBuffer.byteLength));
+      if (u.length >= 8 && u[4] === 0x66 && u[5] === 0x74 && u[6] === 0x79 && u[7] === 0x70) {
+        return "audio/mp4";
+      }
+      if (u.length >= 4 && u[0] === 0x4F && u[1] === 0x67 && u[2] === 0x67 && u[3] === 0x53) {
+        return "audio/ogg";
+      }
+      if (u.length >= 4 && u[0] === 0x52 && u[1] === 0x49 && u[2] === 0x46 && u[3] === 0x46) {
+        return "audio/wav";
+      }
+      if (u.length >= 2 && u[0] === 0xFF && (u[1] & 0xF6) === 0xF0) {
+        return "audio/aac";
+      }
+    } catch (_) {}
+    return "audio/mpeg";
+  }
+
+  // --- Protected 8-stream HTML5 <audio> pool (Looping BGM is NEVER evicted by non-looping SFX!) ---
+  const streamPool = [];
+  const MAX_STREAM_ELEMENTS = 8;
+  const blobUrlRing = [];
+  const MAX_BLOB_URLS = 6;
+
+  function registerBlobUrl(url) {
+    if (!url) return null;
+    blobUrlRing.push(url);
+    while (blobUrlRing.length > MAX_BLOB_URLS) {
+      const old = blobUrlRing.shift();
+      try { URL.revokeObjectURL(old); } catch (_) {}
+    }
+    return url;
+  }
+
+  function acquireAudioStream(streamUrl, isLoop, volume) {
+    let item = null;
+    // 1. Prefer an idle (paused or ended) element
+    for (let i = 0; i < streamPool.length; i++) {
+      if (streamPool[i].paused || streamPool[i].ended) {
+        item = streamPool[i];
+        break;
+      }
+    }
+    // 2. Create new element if pool not full
+    if (!item && streamPool.length < MAX_STREAM_ELEMENTS && typeof window.Audio === "function") {
+      item = new window.Audio();
+      item.preload = "auto";
+      streamPool.push(item);
+    }
+    // 3. If pool is full, NEVER evict a playing looping BGM unless the new request is also a looping BGM!
+    if (!item && streamPool.length > 0) {
+      let victimIdx = -1;
+      for (let i = 0; i < streamPool.length; i++) {
+        if (!streamPool[i].loop) {
+          victimIdx = i;
+          break;
+        }
+      }
+      if (victimIdx === -1 && isLoop) {
+        victimIdx = 0;
+      }
+      if (victimIdx !== -1) {
+        item = streamPool.splice(victimIdx, 1)[0];
+        try { nativePause.call(item); } catch (_) {}
+        streamPool.push(item);
+      }
+    }
+    if (!item) return null;
+    if (item.__gardendlessVolTimer) {
+      clearInterval(item.__gardendlessVolTimer);
+      item.__gardendlessVolTimer = null;
+    }
+    item.src = streamUrl;
+    item.loop = !!isLoop;
+    item.volume = typeof volume === "number" && Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
+    return item;
+  }
+
+  // --- Track GainNode chain so fade-ins and BGM volume sliders apply to streamed <audio> ---
+  const OrigSourceNode = window.AudioBufferSourceNode;
+  const OrigAudioNode = window.AudioNode;
+
+  if (OrigAudioNode && OrigAudioNode.prototype && typeof OrigAudioNode.prototype.connect === "function") {
+    const origNodeConnect = OrigAudioNode.prototype.connect;
+    OrigAudioNode.prototype.connect = function (dest) {
+      try {
+        if (dest && dest.gain && typeof dest.gain.value === "number") {
+          if (OrigSourceNode && this instanceof OrigSourceNode) {
+            this.__gardendlessGainNode = dest;
+          } else if (this && this.gain && typeof this.gain.value === "number" && this !== dest) {
+            this.__gardendlessNextGain = dest;
+          }
+        }
+      } catch (_) {}
+      return origNodeConnect.apply(this, arguments);
+    };
+  }
+
+  function computeEffectiveVolume(sourceNode) {
+    let vol = 1.0;
+    let foundGain = false;
+    let node = sourceNode && sourceNode.__gardendlessGainNode;
+    let depth = 0;
+    while (node && depth < 6) {
+      if (node.gain && typeof node.gain.value === "number" && Number.isFinite(node.gain.value)) {
+        vol *= Math.max(0, Math.min(1, node.gain.value));
+        foundGain = true;
+      }
+      node = node.__gardendlessNextGain;
+      depth++;
+    }
+    return foundGain ? Math.max(0, Math.min(1, vol)) : 1.0;
+  }
+
+  if (OrigSourceNode && OrigSourceNode.prototype) {
+    const origConnect = OrigSourceNode.prototype.connect;
+    const origStart = OrigSourceNode.prototype.start;
+    const origStop = OrigSourceNode.prototype.stop;
+
+    OrigSourceNode.prototype.connect = function (dest) {
+      if (dest && dest.gain && typeof dest.gain.value === "number") {
+        this.__gardendlessGainNode = dest;
+      }
+      return origConnect.apply(this, arguments);
+    };
+
+    OrigSourceNode.prototype.start = function (when, offset) {
+      const buf = this.buffer;
+      if (buf && (buf.__gardendlessStreamUrl || buf.__gardendlessBlobBytes)) {
+        const self = this;
+        let url = buf.__gardendlessStreamUrl;
+        if (!url && buf.__gardendlessBlobBytes && typeof Blob !== "undefined" && typeof URL !== "undefined") {
+          try {
+            const mime = buf.__gardendlessMime || "audio/mp4";
+            url = registerBlobUrl(URL.createObjectURL(new Blob([buf.__gardendlessBlobBytes], { type: mime })));
+            buf.__gardendlessStreamUrl = url;
+          } catch (_) {}
+        }
+        if (url) {
+          let initVol = computeEffectiveVolume(self);
+          // If BGM starts at gain 0 for a fade-in, start at 1.0 or follow gain ramp
+          if (initVol <= 0.0001 && self.loop) initVol = 1.0;
+          const audio = acquireAudioStream(url, self.loop, initVol);
+          if (audio) {
+            self.__gardendlessAudio = audio;
+            audio.addEventListener("loadedmetadata", function onMeta() {
+              audio.removeEventListener("loadedmetadata", onMeta);
+              if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                buf.__gardendlessDuration = audio.duration;
+              }
+            });
+            if (typeof offset === "number" && offset > 0) {
+              try { audio.currentTime = offset; } catch (_) {}
+            }
+            const fireEnded = function () {
+              if (audio.__gardendlessVolTimer) {
+                clearInterval(audio.__gardendlessVolTimer);
+                audio.__gardendlessVolTimer = null;
+              }
+              if (typeof self.onended === "function") {
+                try { self.onended(new Event("ended")); } catch (_) {}
+              }
+              if (typeof self.dispatchEvent === "function") {
+                try { self.dispatchEvent(new Event("ended")); } catch (_) {}
+              }
+            };
+            audio.onended = function () {
+              if (!self.loop) fireEnded();
+            };
+            audio.__gardendlessVolTimer = setInterval(function () {
+              if (audio.paused || audio.ended || self.__gardendlessAudio !== audio) {
+                clearInterval(audio.__gardendlessVolTimer);
+                audio.__gardendlessVolTimer = null;
+                return;
+              }
+              audio.loop = !!self.loop;
+              const currentVol = computeEffectiveVolume(self);
+              if (currentVol > 0.0001 || !self.loop) {
+                audio.volume = currentVol;
+              }
+            }, 200);
+            const p = Media.prototype.play.call(audio);
+            if (p && typeof p.catch === "function") {
+              p.catch(function () { setTimeout(fireEnded, 100); });
+            }
+            return;
+          }
+        }
+      }
+      return origStart.apply(this, arguments);
+    };
+
+    OrigSourceNode.prototype.stop = function () {
+      if (this.__gardendlessAudio) {
+        const audio = this.__gardendlessAudio;
+        this.__gardendlessAudio = null;
+        if (audio.__gardendlessVolTimer) {
+          clearInterval(audio.__gardendlessVolTimer);
+          audio.__gardendlessVolTimer = null;
+        }
+        try {
+          audio.onended = null;
+          nativePause.call(audio);
+        } catch (_) {}
+        if (typeof this.onended === "function") {
+          try { this.onended(new Event("ended")); } catch (_) {}
+        }
+        if (typeof this.dispatchEvent === "function") {
+          try { this.dispatchEvent(new Event("ended")); } catch (_) {}
+        }
+        return;
+      }
+      return origStop.apply(this, arguments);
+    };
+  }
+
+  // --- Intercept decodeAudioData: Offload > 64KB to <audio> (0 PCM RAM!) & 16kHz native decode for <= 64KB SFX ---
   if (typeof Base.prototype.decodeAudioData === "function") {
     const origDecode = Base.prototype.decodeAudioData;
     const decodeQueue = [];
     let activeDecodes = 0;
 
-    function createSilentFallbackBuffer(ctx) {
-      if (ctx.__gardendlessSilentBuffer) return ctx.__gardendlessSilentBuffer;
+    function createPlaceholderBuffer(ctx, streamUrl, blobBytes, mime, byteLen) {
+      if (!streamUrl && !blobBytes && ctx.__gardendlessSilentBuffer) {
+        return ctx.__gardendlessSilentBuffer;
+      }
       const sr = ctx.sampleRate || TARGET_SAMPLE_RATE;
       const len = Math.max(1600, Math.floor(sr * 0.1));
+      const estDuration = byteLen > 0 ? Math.max(4.0, Math.round((byteLen / 16000) * 10) / 10) : 0.1;
       const buf = typeof ctx.createBuffer === "function"
         ? ctx.createBuffer(1, len, sr)
-        : { duration: 0.1, length: len, numberOfChannels: 1, sampleRate: sr };
-      ctx.__gardendlessSilentBuffer = buf;
+        : { duration: estDuration, length: len, numberOfChannels: 1, sampleRate: sr };
+      if (streamUrl || blobBytes) {
+        buf.__gardendlessStreamUrl = streamUrl || null;
+        buf.__gardendlessBlobBytes = blobBytes || null;
+        buf.__gardendlessMime = mime || "audio/mp4";
+        buf.__gardendlessDuration = estDuration;
+        try {
+          Object.defineProperty(buf, "duration", {
+            configurable: true,
+            get: function () { return this.__gardendlessDuration || estDuration; }
+          });
+        } catch (_) {}
+      } else {
+        ctx.__gardendlessSilentBuffer = buf;
+      }
       return buf;
-    }
-
-    function compressAudioBufferToMono(ctx, buf) {
-      if (!buf || typeof ctx.createBuffer !== "function" || typeof buf.getChannelData !== "function") {
-        return buf;
-      }
-      try {
-        const len = buf.length || 0;
-        const sr = buf.sampleRate || TARGET_SAMPLE_RATE;
-        const channels = buf.numberOfChannels || 1;
-        const duration = buf.duration || (sr > 0 ? len / sr : 0);
-        if (len <= 0) return buf;
-
-        // Long tracks (BGM / ambient > 8s): downsample to 12kHz 1-channel Mono (~2.7MB per 60s BGM instead of 22MB!)
-        if (duration > BGM_DURATION_THRESHOLD_SEC && sr > BGM_SAMPLE_RATE) {
-          const ratio = sr / BGM_SAMPLE_RATE;
-          const newLen = Math.max(1, Math.floor(len / ratio));
-          const mono = ctx.createBuffer(1, newLen, BGM_SAMPLE_RATE);
-          const out = mono.getChannelData(0);
-          const ch0 = buf.getChannelData(0);
-          const ch1 = channels > 1 ? buf.getChannelData(1) : null;
-          if (ch1) {
-            for (let i = 0; i < newLen; i++) {
-              const idx = Math.min(len - 1, (i * ratio) | 0);
-              out[i] = (ch0[idx] + ch1[idx]) * 0.5;
-            }
-          } else {
-            for (let i = 0; i < newLen; i++) {
-              out[i] = ch0[Math.min(len - 1, (i * ratio) | 0)];
-            }
-          }
-          return mono;
-        }
-
-        // Short/medium SFX (<= 8s): if already 1-channel Mono, keep as-is; if Stereo, downmix to 1-channel Mono (halves RAM)
-        if (channels <= 1) {
-          return buf;
-        }
-        const mono = ctx.createBuffer(1, len, sr);
-        const out = mono.getChannelData(0);
-        const ch0 = buf.getChannelData(0);
-        const ch1 = buf.getChannelData(1);
-        for (let i = 0; i < len; i++) {
-          out[i] = (ch0[i] + ch1[i]) * 0.5;
-        }
-        return mono;
-      } catch (_) {
-        return buf;
-      }
     }
 
     function pumpDecodeQueue() {
@@ -168,7 +410,7 @@
       if (totalPcmBytes >= MAX_TOTAL_PCM_BYTES) {
         activeDecodes--;
         pumpDecodeQueue();
-        const silent = createSilentFallbackBuffer(self);
+        const silent = createPlaceholderBuffer(self, null, null, null, 0);
         if (typeof successCallback === "function") {
           try { successCallback(silent); } catch (_) {}
         }
@@ -181,15 +423,14 @@
         if (settled) return;
         settled = true;
         activeDecodes--;
-        const compactBuffer = compressAudioBufferToMono(self, decodedBuffer);
-        if (compactBuffer && typeof compactBuffer.length === "number") {
-          totalPcmBytes += compactBuffer.length * (compactBuffer.numberOfChannels || 1) * 4;
+        if (decodedBuffer && typeof decodedBuffer.length === "number") {
+          totalPcmBytes += decodedBuffer.length * (decodedBuffer.numberOfChannels || 1) * 4;
         }
         pumpDecodeQueue();
         if (typeof successCallback === "function") {
-          try { successCallback(compactBuffer); } catch (_) {}
+          try { successCallback(decodedBuffer); } catch (_) {}
         }
-        resolve(compactBuffer);
+        resolve(decodedBuffer);
       };
 
       const onError = function (err) {
@@ -218,6 +459,27 @@
       if (!(self instanceof Base)) {
         return origDecode.apply(self, arguments);
       }
+      const byteLen = arrayBuffer && typeof arrayBuffer.byteLength === "number" ? arrayBuffer.byteLength : 0;
+
+      // Offload all BGM, music, and long audio (> 64KB) to WebKit <audio> streaming (0 PCM RAM!)
+      if (byteLen > STREAM_AUDIO_OVER_BYTES) {
+        const directUrl = arrayBuffer.__gardendlessAudioUrl || null;
+        const mime = sniffAudioMime(arrayBuffer);
+        let blobBytes = null;
+        if (!directUrl) {
+          try {
+            blobBytes = arrayBuffer.slice ? arrayBuffer.slice(0) : new Uint8Array(arrayBuffer);
+          } catch (_) {}
+        }
+        const placeholder = createPlaceholderBuffer(self, directUrl, blobBytes, mime, byteLen);
+        if (typeof successCallback === "function") {
+          setTimeout(function () {
+            try { successCallback(placeholder); } catch (_) {}
+          }, 0);
+        }
+        return Promise.resolve(placeholder);
+      }
+
       return new Promise(function (resolve, reject) {
         decodeQueue.push({
           ctx: self,
@@ -233,7 +495,7 @@
   }
 
   // --- CRITICAL TEXTURE MEMORY OPTIMIZER (Fixes Cocos 3.8 ImageBitmap & WebGL2 RGBA8 OOM!) ---
-  // 1. Throttle window.createImageBitmap to max 2 concurrent decodes to prevent 600MB+ parallel burst spikes
+  // 1. Throttle window.createImageBitmap to max 2 concurrent decodes to prevent parallel burst spikes
   if (typeof window.createImageBitmap === "function") {
     const origCreateImageBitmap = window.createImageBitmap;
     const bitmapQueue = [];
@@ -262,15 +524,13 @@
     };
   }
 
-  // 2. Immediately close() ImageBitmap and strip HTMLImageElement.src after WebGL upload,
-  //    AND convert WebGL2 texStorage2D from 32-bit RGBA8 (0x8058) to 16-bit RGBA4 (0x8056) to halve GPU VRAM!
+  // 2. Close() ImageBitmap in 16ms (1 frame) after WebGL upload, and convert WebGL2 RGBA8 -> RGBA4 (16-bit)
   function releaseTextureSourceCpuMemory(source) {
     if (!source || source.__gardendlessCpuReleased) return;
-    // Case A: ImageBitmap (used by Cocos Creator 3.8 on iOS!)
     if (typeof source.close === "function") {
       const w = source.width || 0;
       const h = source.height || 0;
-      if (w < 128 && h < 128) return;
+      if (w < 32 && h < 32) return;
       source.__gardendlessCpuReleased = true;
       setTimeout(function () {
         try {
@@ -278,14 +538,13 @@
           Object.defineProperty(source, "height", { value: h, configurable: true });
           source.close();
         } catch (_) {}
-      }, 150);
+      }, 16);
       return;
     }
-    // Case B: HTMLImageElement
     if (typeof window.HTMLImageElement === "function" && source instanceof window.HTMLImageElement) {
       const w = source.naturalWidth || source.width || 0;
       const h = source.naturalHeight || source.height || 0;
-      if (w < 256 && h < 256) return;
+      if (w < 128 && h < 128) return;
       source.__gardendlessCpuReleased = true;
       setTimeout(function () {
         try {
@@ -295,18 +554,31 @@
           Object.defineProperty(source, "naturalHeight", { value: h, configurable: true });
           source.removeAttribute("src");
         } catch (_) {}
-      }, 500);
+      }, 200);
+    }
+  }
+
+  if (typeof window.HTMLCanvasElement === "function" && window.HTMLCanvasElement.prototype) {
+    const origGetContext = window.HTMLCanvasElement.prototype.getContext;
+    if (typeof origGetContext === "function") {
+      window.HTMLCanvasElement.prototype.getContext = function (type) {
+        const ctx = origGetContext.apply(this, arguments);
+        if (ctx && (type === "webgl2" || type === "webgl" || type === "experimental-webgl")) {
+          trackedGlContexts.add(ctx);
+        }
+        return ctx;
+      };
     }
   }
 
   [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (GLCtor) {
     if (!GLCtor || !GLCtor.prototype) return;
 
-    // Halve GPU VRAM in WebGL2 by converting 32-bit RGBA8 (0x8058) to 16-bit RGBA4 (0x8056) for textures >= 256px
+    // Halve GPU VRAM in WebGL2 by converting 32-bit RGBA8 (0x8058) to 16-bit RGBA4 (0x8056) for textures >= 64px
     if (typeof GLCtor.prototype.texStorage2D === "function") {
       const origTexStorage2D = GLCtor.prototype.texStorage2D;
       GLCtor.prototype.texStorage2D = function (target, levels, internalformat, width, height) {
-        if (internalformat === 0x8058 && (width >= 256 || height >= 256)) {
+        if (internalformat === 0x8058 && (width >= 64 || height >= 64)) {
           internalformat = 0x8056; // GL_RGBA4 (2 bytes/pixel instead of 4 bytes/pixel -> 50% GPU VRAM saved!)
         }
         return origTexStorage2D.call(this, target, levels, internalformat, width, height);
@@ -326,4 +598,33 @@
       };
     });
   });
+
+  // 3. Reclaim 100% of WebGL GPU VRAM and AudioContext C++ memory immediately when GP Next reloads the page!
+  if (typeof window.addEventListener === "function") {
+    const cleanupOnReload = function () {
+      try {
+        streamPool.forEach(function (a) {
+          try {
+            nativePause.call(a);
+            a.removeAttribute("src");
+            a.load();
+          } catch (_) {}
+        });
+        streamPool.length = 0;
+        contexts.forEach(function (ctx) {
+          try { if (typeof ctx.close === "function") ctx.close(); } catch (_) {}
+        });
+        contexts.clear();
+        trackedGlContexts.forEach(function (gl) {
+          try {
+            const ext = typeof gl.getExtension === "function" ? gl.getExtension("WEBGL_lose_context") : null;
+            if (ext && typeof ext.loseContext === "function") ext.loseContext();
+          } catch (_) {}
+        });
+        trackedGlContexts.clear();
+      } catch (_) {}
+    };
+    window.addEventListener("beforeunload", cleanupOnReload);
+    window.addEventListener("pagehide", cleanupOnReload);
+  }
 })();
