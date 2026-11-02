@@ -16,8 +16,8 @@
   let waiting = [];
 
   const TARGET_SAMPLE_RATE = 16000;
-  const STREAM_AUDIO_OVER_BYTES = 64 * 1024;
-  const MAX_TOTAL_PCM_BYTES = 30 * 1024 * 1024;
+  const STREAM_AUDIO_OVER_BYTES = 28 * 1024;
+  const MAX_TOTAL_PCM_BYTES = 75 * 1024 * 1024;
   const MAX_CONCURRENT_AUDIO_DECODES = 4;
   let totalPcmBytes = 0;
 
@@ -160,11 +160,11 @@
     return "audio/mpeg";
   }
 
-  // --- Protected 12-stream HTML5 <audio> pool (Looping BGM is NEVER evicted by non-looping SFX!) ---
+  // --- Protected 16-stream HTML5 <audio> pool (Looping BGM is NEVER evicted by non-looping SFX!) ---
   const streamPool = [];
-  const MAX_STREAM_ELEMENTS = 12;
+  const MAX_STREAM_ELEMENTS = 16;
   const blobUrlRing = [];
-  const MAX_BLOB_URLS = 6;
+  const MAX_BLOB_URLS = 8;
 
   function registerBlobUrl(url) {
     if (!url) return null;
@@ -279,7 +279,7 @@
         }
         if (url) {
           let initVol = computeEffectiveVolume(self);
-          if (initVol <= 0.0001 && self.loop) initVol = 1.0;
+          if (initVol <= 0.0001) initVol = 1.0;
           const audio = acquireAudioStream(url, self.loop, initVol);
           if (audio) {
             self.__gardendlessAudio = audio;
@@ -316,7 +316,7 @@
               }
               audio.loop = !!self.loop;
               const currentVol = computeEffectiveVolume(self);
-              if (currentVol > 0.0001 || !self.loop) {
+              if (currentVol > 0.0001) {
                 audio.volume = currentVol;
               }
             }, 200);
@@ -372,7 +372,7 @@
     };
   }
 
-  // --- Intercept decodeAudioData: Offload > 64KB to <audio> (0 PCM RAM!) & 16kHz native decode for <= 64KB SFX ---
+  // --- Intercept decodeAudioData: Offload > 28KB to <audio> (0 PCM RAM!) & 16kHz native decode for <= 28KB SFX (75MB budget) ---
   if (typeof Base.prototype.decodeAudioData === "function") {
     const origDecode = Base.prototype.decodeAudioData;
     const decodeQueue = [];
@@ -475,7 +475,7 @@
       }
       const byteLen = arrayBuffer && typeof arrayBuffer.byteLength === "number" ? arrayBuffer.byteLength : 0;
 
-      // Offload all BGM, music, and long audio (> 64KB) to WebKit <audio> streaming (0 PCM RAM!)
+      // Offload all BGM, jingles, and tracks > 28KB to WebKit <audio> streaming (0 PCM RAM!)
       if (byteLen > STREAM_AUDIO_OVER_BYTES) {
         const directUrl = arrayBuffer.__gardendlessAudioUrl || null;
         const mime = sniffAudioMime(arrayBuffer);
@@ -509,7 +509,6 @@
   }
 
   // --- CRITICAL TEXTURE MEMORY OPTIMIZER ---
-  // 1. Throttle window.createImageBitmap to max 2 concurrent decodes to prevent parallel burst spikes
   if (typeof window.createImageBitmap === "function") {
     const origCreateImageBitmap = window.createImageBitmap;
     const bitmapQueue = [];
@@ -538,7 +537,6 @@
     };
   }
 
-  // 2. Close() ImageBitmap in 16ms (1 frame) after WebGL upload
   function releaseTextureSourceCpuMemory(source) {
     if (!source || source.__gardendlessCpuReleased) return;
     if (typeof source.close === "function") {
@@ -588,8 +586,6 @@
   [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (GLCtor) {
     if (!GLCtor || !GLCtor.prototype) return;
 
-    // ALWAYS compress large sprite sheet atlases (BOTH width >= 256 AND height >= 256) to 16-bit RGBA4 (0x8056)
-    // to save ~350-400MB GPU VRAM, while keeping text labels (where height < 256) in 32-bit RGBA8!
     if (typeof GLCtor.prototype.texStorage2D === "function") {
       const origTexStorage2D = GLCtor.prototype.texStorage2D;
       GLCtor.prototype.texStorage2D = function (target, levels, internalformat, width, height) {
@@ -614,7 +610,6 @@
     });
   });
 
-  // 3. Reclaim 100% of WebGL GPU VRAM and AudioContext C++ memory immediately when GP Next reloads the page!
   if (typeof window.addEventListener === "function") {
     const cleanupOnReload = function () {
       try {

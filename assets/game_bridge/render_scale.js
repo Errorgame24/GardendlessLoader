@@ -1,8 +1,5 @@
 (function () {
   "use strict";
-  // Cocos sizes the game canvas by window.devicePixelRatio, so scaling the
-  // value it reads shrinks the WebGL back buffer and its GPU memory. Injected
-  // after touch_input_adapter.js, which keeps measuring the real ratio.
   const host = window.__gardendlessHost;
   const config = host && host.config ? host.config : {};
   const scale = config.renderScale;
@@ -23,7 +20,6 @@
         if (scale <= 0.75) return Math.min(ratio * scale, 1.6);
         return Math.min(ratio * scale, 2.0);
       }
-      // Launcher 100% (scale === null): 2.0x Retina HD (4x more pixels than 1.0x, 56% less VRAM than 3.0x)
       return Math.min(ratio, 2.0);
     }
   });
