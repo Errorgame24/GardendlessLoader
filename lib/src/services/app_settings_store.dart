@@ -32,14 +32,15 @@ enum LanguagePreference {
 /// Renders the game at a share of the device's native resolution; a lower
 /// share shrinks the game canvas and its GPU memory at the cost of sharpness.
 enum RenderResolution {
-  full(null),
-  medium(0.75),
-  low(0.5);
+  full(null, 100),
+  medium(0.75, 75),
+  low(0.5, 50);
 
-  const RenderResolution(this.scale);
+  const RenderResolution(this.scale, this.defaultPercent);
 
   /// Share of the device pixel ratio the game renders at; null is native.
   final double? scale;
+  final int defaultPercent;
 
   static RenderResolution fromName(Object? value) {
     return RenderResolution.values.firstWhere(
@@ -54,7 +55,7 @@ class AppSettings {
     this.watermarkEnabled = true,
     this.quickLaunchEnabled = false,
     this.renderResolution = RenderResolution.full,
-    this.customRenderPercent,
+    this.customRenderPercent = 100,
     this.screenFit = ScreenFit.balanced,
     this.detailedAudioDiagnosticsEnabled = false,
     this.themePreference = ThemePreference.system,
@@ -67,11 +68,16 @@ class AppSettings {
   });
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
+    final resolution = RenderResolution.fromName(json['renderResolution']);
+    final rawPercent = json['customRenderPercent'];
+    final parsedPercent = rawPercent is num
+        ? rawPercent.round().clamp(1, 100)
+        : resolution.defaultPercent;
     return AppSettings(
       watermarkEnabled: json['watermarkEnabled'] as bool? ?? true,
       quickLaunchEnabled: json['quickLaunchEnabled'] as bool? ?? false,
-      renderResolution: RenderResolution.fromName(json['renderResolution']),
-      customRenderPercent: json['customRenderPercent'] is int ? (json['customRenderPercent'] as int).clamp(1, 100) : null,
+      renderResolution: resolution,
+      customRenderPercent: parsedPercent,
       screenFit: ScreenFit.fromName(json['screenFit']),
       detailedAudioDiagnosticsEnabled:
           json['detailedAudioDiagnosticsEnabled'] as bool? ?? false,
@@ -92,7 +98,9 @@ class AppSettings {
   /// Opens the game directly on a cold start instead of the launcher.
   final bool quickLaunchEnabled;
   final RenderResolution renderResolution;
-  final int? customRenderPercent;
+
+  /// Fine-grained 1%–100% render resolution percentage selected by the user.
+  final int customRenderPercent;
   final ScreenFit screenFit;
   final bool detailedAudioDiagnosticsEnabled;
   final ThemePreference themePreference;
@@ -113,12 +121,17 @@ class AppSettings {
   /// The gesture hint shows over the game once, on the first launch.
   final bool gestureHintShown;
 
+  /// Effective scale (0.01–0.99, or null for 100% native) passed to GameSession.
+  double? get effectiveRenderScale {
+    final clamped = customRenderPercent.clamp(1, 100);
+    return clamped >= 100 ? null : clamped / 100.0;
+  }
+
   AppSettings copyWith({
     bool? watermarkEnabled,
     bool? quickLaunchEnabled,
     RenderResolution? renderResolution,
     int? customRenderPercent,
-    bool clearCustomRenderPercent = false,
     ScreenFit? screenFit,
     bool? detailedAudioDiagnosticsEnabled,
     ThemePreference? themePreference,
@@ -133,7 +146,8 @@ class AppSettings {
       watermarkEnabled: watermarkEnabled ?? this.watermarkEnabled,
       quickLaunchEnabled: quickLaunchEnabled ?? this.quickLaunchEnabled,
       renderResolution: renderResolution ?? this.renderResolution,
-      customRenderPercent: clearCustomRenderPercent ? null : (customRenderPercent ?? this.customRenderPercent),
+      customRenderPercent:
+          (customRenderPercent ?? this.customRenderPercent).clamp(1, 100),
       screenFit: screenFit ?? this.screenFit,
       detailedAudioDiagnosticsEnabled: detailedAudioDiagnosticsEnabled ??
           this.detailedAudioDiagnosticsEnabled,
@@ -152,7 +166,7 @@ class AppSettings {
         'watermarkEnabled': watermarkEnabled,
         'quickLaunchEnabled': quickLaunchEnabled,
         'renderResolution': renderResolution.name,
-        if (customRenderPercent != null) 'customRenderPercent': customRenderPercent,
+        'customRenderPercent': customRenderPercent.clamp(1, 100),
         'screenFit': screenFit.name,
         'detailedAudioDiagnosticsEnabled': detailedAudioDiagnosticsEnabled,
         'themePreference': themePreference.name,

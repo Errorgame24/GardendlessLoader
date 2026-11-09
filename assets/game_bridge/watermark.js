@@ -1,9 +1,27 @@
 (function () {
   "use strict";
   const id = "gardendless-native-watermark";
-  const panelId = "gardendless-lain-hud";
+  const panelId = "gardendless-lain-scale-panel";
 
-  function toggleHud() {
+  function getScalePercent() {
+    if (typeof window.__gardendlessGetRenderScale === "function") {
+      return Math.max(1, Math.min(100, Math.round(window.__gardendlessGetRenderScale() * 100)));
+    }
+    const host = window.__gardendlessHost;
+    const s = host && host.config && typeof host.config.renderScale === "number"
+      ? host.config.renderScale : 1;
+    return Math.max(1, Math.min(100, Math.round(s * 100)));
+  }
+
+  function applyScalePercent(pct) {
+    const clamped = Math.max(1, Math.min(100, Math.round(Number(pct) || 100)));
+    if (typeof window.__gardendlessSetRenderScale === "function") {
+      window.__gardendlessSetRenderScale(clamped / 100);
+    }
+    return clamped;
+  }
+
+  function togglePanel() {
     let panel = document.getElementById(panelId);
     if (panel) {
       panel.style.display = panel.style.display === "none" ? "block" : "none";
@@ -14,86 +32,151 @@
     Object.assign(panel.style, {
       position: "fixed",
       right: "12px",
-      bottom: "32px",
+      bottom: "34px",
       zIndex: "2147483647",
-      background: "rgba(12, 16, 22, 0.88)",
-      border: "1px solid rgba(120, 220, 255, 0.35)",
-      borderRadius: "8px",
+      background: "rgba(12, 16, 14, 0.90)",
+      border: "1px solid rgba(130, 210, 150, 0.42)",
+      borderRadius: "10px",
       padding: "10px 12px",
-      color: "#e0f4ff",
-      font: "500 12px -apple-system,BlinkMacSystemFont,sans-serif",
-      boxShadow: "0 4px 16px rgba(0,0,0,0.6)",
-      backdropFilter: "blur(6px)",
-      webkitBackdropFilter: "blur(6px)",
-      minWidth: "210px",
-      userSelect: "none"
+      color: "#e8f5e9",
+      font: "600 12px -apple-system,BlinkMacSystemFont,monospace,sans-serif",
+      boxShadow: "0 6px 20px rgba(0,0,0,0.65)",
+      backdropFilter: "blur(8px)",
+      webkitBackdropFilter: "blur(8px)",
+      userSelect: "none",
+      minWidth: "225px"
     });
 
-    const state = window.__gardendlessGetRenderState
-      ? window.__gardendlessGetRenderState()
-      : { percent: 100, fpsCap: 60 };
+    const stopProp = function (e) { e.stopPropagation(); };
+    ["pointerdown", "pointermove", "pointerup", "touchstart", "touchmove", "touchend", "mousedown", "click"].forEach(function (ev) {
+      panel.addEventListener(ev, stopProp, { passive: false });
+    });
 
-    const titleRow = document.createElement("div");
-    titleRow.style.marginBottom = "6px";
-    titleRow.style.display = "flex";
-    titleRow.style.justifyContent = "space-between";
-    const label = document.createElement("span");
-    label.textContent = "渲染分辨率: " + state.percent + "%";
-    const closeBtn = document.createElement("span");
-    closeBtn.textContent = "✕";
-    closeBtn.style.cursor = "pointer";
-    closeBtn.style.opacity = "0.7";
-    closeBtn.onclick = function () { panel.style.display = "none"; };
-    titleRow.appendChild(label);
-    titleRow.appendChild(closeBtn);
+    const header = document.createElement("div");
+    Object.assign(header.style, {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: "6px"
+    });
+    const title = document.createElement("span");
+    title.textContent = "NAVI // RENDER SCALE";
+    title.style.color = "#81c784";
+    title.style.fontSize = "11px";
+    title.style.letterSpacing = "0.5px";
+
+    const valLabel = document.createElement("span");
+    valLabel.textContent = getScalePercent() + "%";
+    valLabel.style.color = "#ffffff";
+    valLabel.style.fontWeight = "700";
+
+    header.appendChild(title);
+    header.appendChild(valLabel);
+    panel.appendChild(header);
 
     const slider = document.createElement("input");
     slider.type = "range";
     slider.min = "1";
     slider.max = "100";
     slider.step = "1";
-    slider.value = String(state.percent);
-    slider.style.width = "100%";
-    slider.style.margin = "4px 0 8px 0";
-    slider.oninput = function () {
-      const p = parseInt(slider.value, 10) || 100;
-      label.textContent = "渲染分辨率: " + p + "%";
-      if (window.__gardendlessSetLiveRenderScale) {
-        window.__gardendlessSetLiveRenderScale(p, null);
-      }
-    };
-
-    const fpsRow = document.createElement("div");
-    fpsRow.style.display = "flex";
-    fpsRow.style.gap = "6px";
-    fpsRow.style.justifyContent = "space-between";
-    [30, 48, 60].forEach(function (fps) {
-      const btn = document.createElement("button");
-      btn.textContent = fps + " FPS";
-      Object.assign(btn.style, {
-        flex: "1",
-        padding: "4px 0",
-        background: state.fpsCap === fps ? "rgba(80, 190, 255, 0.35)" : "rgba(255,255,255,0.1)",
-        color: "#fff",
-        border: "1px solid rgba(255,255,255,0.2)",
-        borderRadius: "4px",
-        fontSize: "11px"
-      });
-      btn.onclick = function () {
-        Array.from(fpsRow.children).forEach(function (c) {
-          c.style.background = "rgba(255,255,255,0.1)";
-        });
-        btn.style.background = "rgba(80, 190, 255, 0.35)";
-        if (window.__gardendlessSetLiveRenderScale) {
-          window.__gardendlessSetLiveRenderScale(parseInt(slider.value, 10) || 100, fps);
-        }
-      };
-      fpsRow.appendChild(btn);
+    slider.value = String(getScalePercent());
+    Object.assign(slider.style, {
+      width: "100%",
+      accentColor: "#66bb6a",
+      margin: "4px 0 8px 0"
     });
 
-    panel.appendChild(titleRow);
+    slider.addEventListener("input", function () {
+      const pct = applyScalePercent(slider.value);
+      valLabel.textContent = pct + "%";
+    });
     panel.appendChild(slider);
-    panel.appendChild(fpsRow);
+
+    const presetsRow = document.createElement("div");
+    Object.assign(presetsRow.style, {
+      display: "flex",
+      gap: "4px",
+      justifyContent: "space-between"
+    });
+    [1, 25, 50, 75, 85, 100].forEach(function (preset) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = preset + "%";
+      Object.assign(btn.style, {
+        flex: "1",
+        padding: "3px 0",
+        fontSize: "10px",
+        fontWeight: "600",
+        color: "#e8f5e9",
+        background: "rgba(255,255,255,0.1)",
+        border: "1px solid rgba(255,255,255,0.18)",
+        borderRadius: "5px",
+        cursor: "pointer"
+      });
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        slider.value = String(preset);
+        const pct = applyScalePercent(preset);
+        valLabel.textContent = pct + "%";
+      });
+      presetsRow.appendChild(btn);
+    });
+    panel.appendChild(presetsRow);
+
+    if (typeof window.__gardendlessGetTargetFps === "function") {
+      const fpsHeader = document.createElement("div");
+      Object.assign(fpsHeader.style, {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginTop: "8px",
+        marginBottom: "4px"
+      });
+      const fpsTitle = document.createElement("span");
+      fpsTitle.textContent = "FRAME CAP (COOLING)";
+      fpsTitle.style.color = "#81c784";
+      fpsTitle.style.fontSize = "10px";
+      const fpsVal = document.createElement("span");
+      fpsVal.textContent = window.__gardendlessGetTargetFps() + " FPS";
+      fpsVal.style.color = "#ffffff";
+      fpsVal.style.fontSize = "11px";
+      fpsHeader.appendChild(fpsTitle);
+      fpsHeader.appendChild(fpsVal);
+      panel.appendChild(fpsHeader);
+
+      const fpsRow = document.createElement("div");
+      Object.assign(fpsRow.style, {
+        display: "flex",
+        gap: "4px",
+        justifyContent: "space-between"
+      });
+      [30, 45, 60].forEach(function (fps) {
+        const fBtn = document.createElement("button");
+        fBtn.type = "button";
+        fBtn.textContent = fps + " FPS";
+        Object.assign(fBtn.style, {
+          flex: "1",
+          padding: "3px 0",
+          fontSize: "10px",
+          fontWeight: "600",
+          color: "#e8f5e9",
+          background: "rgba(255,255,255,0.1)",
+          border: "1px solid rgba(255,255,255,0.18)",
+          borderRadius: "5px",
+          cursor: "pointer"
+        });
+        fBtn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (typeof window.__gardendlessSetTargetFps === "function") {
+            const next = window.__gardendlessSetTargetFps(fps);
+            fpsVal.textContent = next + " FPS";
+          }
+        });
+        fpsRow.appendChild(fBtn);
+      });
+      panel.appendChild(fpsRow);
+    }
+
     (document.body || document.documentElement).appendChild(panel);
   }
 
@@ -111,14 +194,21 @@
         pointerEvents: "auto",
         cursor: "pointer",
         userSelect: "none",
-        color: "rgba(255,255,255,.48)",
-        font: "600 12px -apple-system,BlinkMacSystemFont,sans-serif",
-        textShadow: "0 1px 2px rgba(0,0,0,.7)"
+        color: "rgba(255,255,255,.52)",
+        font: "600 12px -apple-system,BlinkMacSystemFont,monospace,sans-serif",
+        letterSpacing: "0.3px",
+        textShadow: "0 1px 2px rgba(0,0,0,.75)",
+        padding: "2px 4px"
       });
       node.addEventListener("click", function (e) {
         e.stopPropagation();
-        toggleHud();
+        togglePanel();
       });
+      node.addEventListener("touchend", function (e) {
+        e.stopPropagation();
+        e.preventDefault();
+        togglePanel();
+      }, { passive: false });
       (document.body || document.documentElement).appendChild(node);
     }
     const enabled = window.__gardendlessHost &&

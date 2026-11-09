@@ -1,0 +1,21 @@
+[package]
+name = "tauri_dumper_ffi"
+version = "0.1.0"
+edition = "2021"
+description = "Native FFI bridge for extracting embedded Tauri frontend assets from PvZ2Gardendless.exe"
+
+[lib]
+name = "tauri_dumper_ffi"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+tauri-dumper = { version = "0.2.2", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

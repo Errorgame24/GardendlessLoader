@@ -129,6 +129,17 @@ jobs:
           echo "### Android build" >> "$GITHUB_STEP_SUMMARY"
           echo "- versionCode: $VERSION_CODE" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Set up Rust toolchain for Android FFI
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Build Rust Tauri Dumper FFI (.so) for Android
+        working-directory: rust/tauri_dumper_ffi
+        run: |
+          cargo install cargo-ndk --locked
+          cargo ndk -t arm64-v8a -t armeabi-v7a -o ../../android/app/src/main/jniLibs build --release
+
       - name: Build release APK
         run: |
           flutter build apk --release \
@@ -231,6 +242,17 @@ jobs:
             --cache-path "$RUNNER_TEMP/gardendless-spm" \
             --filter 'FileTaskCoordinatorTests|TaskCallbackGateTests|BridgeRequestTests|GameConfigurationTests|GameSessionTests|ConstantsTests|ReservedMetadataPathsTests|ResourceMIMETests'
 
+      - name: Set up Rust toolchain for iOS FFI
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Build Rust Tauri Dumper FFI (.a) for iOS
+        working-directory: rust/tauri_dumper_ffi
+        run: |
+          cargo build --release --target aarch64-apple-ios
+          cp target/aarch64-apple-ios/release/libtauri_dumper_ffi.a ../../ios/Runner/libtauri_dumper_ffi.a
+
       - name: Install CocoaPods dependencies
         run: pod install
         working-directory: ios
@@ -281,8 +303,8 @@ jobs:
           archive: false
 
   harmonyos:
-    needs: quality
     if: false
+    needs: quality
     outputs:
       version: ${{ steps.harmonyos_artifact.outputs.version }}
       sha256: ${{ steps.harmonyos_artifact.outputs.sha256 }}

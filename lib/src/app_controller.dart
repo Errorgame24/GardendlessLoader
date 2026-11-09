@@ -153,8 +153,7 @@ class AppController extends ChangeNotifier {
   bool get watermarkEnabled => _appSettings.watermarkEnabled;
   bool get quickLaunchEnabled => _appSettings.quickLaunchEnabled;
   RenderResolution get renderResolution => _appSettings.renderResolution;
-
-  int get renderResolutionPercent => _appSettings.customRenderPercent ?? (switch (_appSettings.renderResolution) { RenderResolution.full => 100, RenderResolution.medium => 75, RenderResolution.low => 50 });
+  int get customRenderPercent => _appSettings.customRenderPercent;
   ScreenFit get screenFit => _appSettings.screenFit;
   bool get detailedAudioDiagnosticsEnabled =>
       _appSettings.detailedAudioDiagnosticsEnabled;
@@ -977,7 +976,7 @@ class AppController extends ChangeNotifier {
       watermarkEnabled: watermarkEnabled,
       autoCollectSunEnabled: _manifest.autoCollectSunEnabled,
       detailedAudioDiagnosticsEnabled: detailedAudioDiagnosticsEnabled,
-      renderScale: _appSettings.customRenderPercent != null ? (_appSettings.customRenderPercent! / 100.0) : renderResolution.scale,
+      renderScale: _appSettings.effectiveRenderScale,
       screenFit: screenFit,
       touchDiagnosticsEnabled: toolShedUnlocked && touchDiagnosticsEnabled,
       gestureHint: _appSettings.gestureHintShown
@@ -1129,14 +1128,24 @@ class AppController extends ChangeNotifier {
     return _updateAppSettings(
       _appSettings.copyWith(
         renderResolution: resolution,
-        clearCustomRenderPercent: true,
+        customRenderPercent: resolution.defaultPercent,
       ),
     );
   }
 
   Future<void> setCustomRenderPercent(int percent) {
+    final clamped = percent.clamp(1, 100);
+    final matchedPreset = switch (clamped) {
+      100 => RenderResolution.full,
+      75 => RenderResolution.medium,
+      50 => RenderResolution.low,
+      _ => _appSettings.renderResolution,
+    };
     return _updateAppSettings(
-      _appSettings.copyWith(customRenderPercent: percent.clamp(1, 100)),
+      _appSettings.copyWith(
+        renderResolution: matchedPreset,
+        customRenderPercent: clamped,
+      ),
     );
   }
 

@@ -106,8 +106,8 @@ class AppStrings {
   String get gpNextIncompatibleShort =>
       _t('GP-Next 不兼容', 'GP-Next incompatible');
   String get importToPlayHint => _t(
-        '导入一份 Gardendless Web 资源 ZIP 后即可开始游戏。',
-        'Import a Gardendless web resource ZIP to start playing.',
+        '导入一份 Gardendless Web 资源 ZIP 或官方 Windows .exe 后即可开始游戏。',
+        'Import a Gardendless web resource ZIP or official Windows .exe to start playing.',
       );
   String get starting => _t('正在启动…', 'Starting…');
   String get startGame => _t('开始游戏', 'Start Game');
@@ -117,17 +117,20 @@ class AppStrings {
   String get importResources => _t('导入资源', 'Import Resources');
   String get updateResources => _t('更新资源', 'Update Resources');
   String get importDescription => _t(
-        '选择 Gardendless Web 资源 ZIP，支持标准 Cocos 构建、GP-Next 构建与移动端优化包。'
+        '选择 Gardendless Web 资源 ZIP 或官方 Windows 桌面版 .exe（原生直解 Tauri 内嵌 Brotli 资源），支持标准 Cocos 构建、GP-Next 构建与移动端优化包。'
             '新资源写入空闲槽，校验和自检通过后才会切换；失败或取消不影响当前资源。',
-        'Choose a Gardendless web resource ZIP: standard Cocos builds, '
-            'GP-Next builds and mobile-optimized packages are supported. New '
-            'resources go to the idle slot and are switched in only after '
-            'validation and the self-check pass; a failure or cancel leaves '
-            'the current resources untouched.',
+        'Choose a Gardendless web resource ZIP or official Windows .exe '
+            '(extracts embedded Tauri Brotli assets natively on device): '
+            'standard Cocos builds, GP-Next builds and mobile-optimized '
+            'packages are supported. New resources go to the idle slot and '
+            'are switched in only after validation and the self-check pass; '
+            'a failure or cancel leaves the current resources untouched.',
       );
   String get importing => _t('导入中…', 'Importing…');
-  String get chooseZipToUpdate => _t('选择 ZIP 更新', 'Select ZIP to update');
-  String get chooseZipToImport => _t('选择 ZIP 导入', 'Select ZIP to import');
+  String get chooseZipToUpdate =>
+      _t('选择 ZIP / EXE 更新', 'Select ZIP / EXE to update');
+  String get chooseZipToImport =>
+      _t('选择 ZIP / EXE 导入', 'Select ZIP / EXE to import');
   List<String> get importSteps => isChinese
       ? const ['读取', '解压', '校验', '自检']
       : const ['Read', 'Extract', 'Validate', 'Self-check'];
@@ -146,7 +149,7 @@ class AppStrings {
   String get elapsed => _t('已用时间', 'Elapsed');
 
   String importPhase(ImportPhase phase) => switch (phase) {
-        ImportPhase.receiving => _t('正在读取 ZIP', 'Reading ZIP'),
+        ImportPhase.receiving => _t('正在读取资源包', 'Reading package'),
         ImportPhase.extracting => _t('正在解压资源', 'Extracting resources'),
         ImportPhase.validating => _t('正在校验资源', 'Validating resources'),
         ImportPhase.scanning => _t('正在统计资源', 'Counting resources'),
@@ -236,11 +239,10 @@ class AppStrings {
         'Presses A about every 3 seconds in play; skipped while paused, in '
             'the background or typing',
       );
-  String get renderResolution => _t('渲染分辨率', 'Render resolution');
+  String get renderResolution => _t('渲染分辨率 (1%–100%)', 'Render resolution (1%–100%)');
   String get renderResolutionSubtitle => _t(
-        '按屏幕原生分辨率的百分比渲染游戏画面，百分比越低越省显存，画面也越模糊',
-        'Renders the game at a percentage of the screen\'s native resolution; '
-            'a lower percentage uses less GPU memory and looks softer',
+        '支持 1%–100% 无级调节（游戏内也可随时点击右下角 present day, present time 水印实时滑动调节）',
+        'Freely adjustable from 1% to 100% (you can also tap the bottom-right "present day, present time" watermark in-game to adjust live)',
       );
   String renderResolutionLabel(RenderResolution resolution) =>
       switch (resolution) {
@@ -263,8 +265,8 @@ class AppStrings {
       };
   String get watermark => _t('游戏水印', 'Watermark');
   String get watermarkSubtitle => _t(
-        '在游戏画面角落显示加载器标识',
-        'Show the loader name in a corner of the game',
+        '在游戏画面右下角显示 present day, present time 标识（点击可呼出实时分辨率与帧率面板）',
+        'Show "present day, present time" in the bottom-right corner (tap in-game to open live resolution & FPS panel)',
       );
 
   // Settings page: appearance.
@@ -356,13 +358,13 @@ class AppStrings {
             'it. A new version may still rewrite it, and an error could '
             'corrupt it, so export your save in the game before updating.',
       );
-  String get continueImport => _t('继续选择 ZIP', 'Continue');
+  String get continueImport => _t('继续选择 ZIP / EXE', 'Continue');
   String importZipTitle(String name) => _t('导入 $name？', 'Import $name?');
   String updateWithZipTitle(String name) =>
       _t('用 $name 更新资源？', 'Update resources with $name?');
   String get importZipMessage => _t(
-        '将把这个 ZIP 作为游戏资源导入。',
-        'This ZIP will be imported as the game resources.',
+        '将把这个资源包（ZIP 或 Tauri EXE）作为游戏资源导入。',
+        'This package (ZIP or Tauri EXE) will be imported as the game resources.',
       );
   String get import => _t('导入', 'Import');
 
@@ -370,7 +372,7 @@ class AppStrings {
   String get openingFilePicker =>
       _t('正在打开系统文件选择器', 'Opening the system file picker');
   String get zipSelectionCancelled =>
-      _t('已取消选择 ZIP', 'ZIP selection cancelled');
+      _t('已取消选择资源包', 'Package selection cancelled');
   String get importSucceeded => _t('导入成功', 'Import succeeded');
   String get importSucceededCleanupDeferred => _t(
         '导入成功，旧槽清理将在下次启动重试',
@@ -485,8 +487,8 @@ class AppStrings {
   List<String> get importTips => isChinese
       ? const [
           '双指轻点就是右键，双指上下滑动可以滚动。',
-          '画面卡顿或游戏闪退？试试把设置里的渲染分辨率调到 75%。',
-          '黑边太宽或画面被裁？设置里的画面比例可以换成完整显示或强制拉伸。',
+          '画面卡顿或游戏闪退？试试把渲染分辨率滑块调低，或者在游戏内点右下角水印实时调节。',
+          '可以直接选择官方 Windows 版 PvZ2Gardendless.exe，加载器会自动提取内嵌资源。',
           '打开自动收集后，关卡中约每 3 秒自动收一次阳光。',
           '更新资源不会删除存档、补丁和 Mod，不过更新前导出一次存档更安心。',
           'JS Mod 会在游戏里执行代码，只安装可信来源的 Mod。',
@@ -498,9 +500,10 @@ class AppStrings {
       : const [
           'A two-finger tap is a right click; swipe with two fingers to '
               'scroll.',
-          'Stutters or crashes? Try setting Render resolution to 75%.',
-          'Black bars too wide or picture cut off? Change Screen fit to Show '
-              'all or Stretch.',
+          'Stutters or crashes? Lower the render resolution slider or tap the '
+              'bottom-right watermark in-game.',
+          'You can directly pick the official Windows PvZ2Gardendless.exe and '
+              'the loader will unpack its embedded assets on device.',
           'With Auto Collect Sun on, sun is collected about every 3 seconds '
               'in a level.',
           'Updating resources keeps your save, patches and Mods, but exporting '

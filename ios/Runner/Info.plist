@@ -10,7 +10,7 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>ZIP Archive</string>
+			<string>Gardendless Resource Package (ZIP / Tauri EXE)</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>LSHandlerRank</key>
@@ -18,6 +18,9 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>public.zip-archive</string>
+				<string>com.microsoft.windows-executable</string>
+				<string>public.executable</string>
+				<string>public.data</string>
 			</array>
 		</dict>
 	</array>

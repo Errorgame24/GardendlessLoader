@@ -1,57 +1,112 @@
 (function () {
   "use strict";
+  // When the app goes to the background, iOS interrupts the web view's audio
+  // session and WebKit does not reactivate it on return. A resume() or media
+  // play() before the scene is active again is refused, and WebKit, which has
+  // already marked the session active, never retries: the page stays silent.
+  // Audio is suspended when the host reports the scene inactive, while the app
+  // is still in the foreground, so WebKit deactivates the session itself;
+  // resume()/play() calls wait while it is inactive, and everything resumes
+  // once it is active, when WebKit activates the session again.
   const Base = window.AudioContext || window.webkitAudioContext;
   const Media = window.HTMLMediaElement;
   if (!Base || !Media) return;
   const nativeResume = Base.prototype.resume;
   const nativeSuspend = Base.prototype.suspend;
+  const nativeDecode = Base.prototype.decodeAudioData;
   const nativePlay = Media.prototype.play;
   const nativePause = Media.prototype.pause;
   const contexts = new Set();
   const media = new Set();
   const suspendedContexts = new Set();
   const pausedMedia = new Set();
-  const trackedGlContexts = new Set();
   let active = true;
   let waiting = [];
 
-  const TARGET_SAMPLE_RATE = 16000;
-  const STREAM_AUDIO_OVER_BYTES = 56 * 1024;
-  const MAX_LRU_PCM_BYTES = 34 * 1024 * 1024;
-  const BG_TRIM_LRU_PCM_BYTES = 18 * 1024 * 1024;
-  const MAX_UNCACHED_PCM_BYTES = 45 * 1024 * 1024;
-  const MAX_CONCURRENT_AUDIO_DECODES = 4;
-  let lruPcmBytes = 0;
-  let uncachedPcmBytes = 0;
-  const sfxLruCache = new Map();
+  const host = window.__gardendlessHost;
+  const isIOS = Boolean(host && host.config && host.config.platform === "ios");
 
-  function trimLruCacheTo(targetBytes) {
-    while (lruPcmBytes > targetBytes && sfxLruCache.size > 0) {
-      const oldestKey = sfxLruCache.keys().next().value;
-      const oldest = sfxLruCache.get(oldestKey);
-      lruPcmBytes = Math.max(0, lruPcmBytes - (oldest ? oldest.bytes : 0));
-      sfxLruCache.delete(oldestKey);
+  // Track ArrayBuffers fetched from audio URLs so we can key the LRU decoded
+  // AudioBuffer cache by URL (eliminating repeat CPU re-decoding across levels)
+  // and route large BGM (> 56 KB) to streaming <audio>.
+  const bufferUrlMap = typeof WeakMap !== "undefined" ? new WeakMap() : null;
+  const streamThresholdBytes = 56 * 1024;
+  const maxSfxCacheBytes = 34 * 1024 * 1024; // 34 MB bounded LRU cache
+  const sfxCache = new Map(); // key -> { buffer, bytes }
+  let sfxCacheBytes = 0;
+
+  function trimSfxCache(limitBytes) {
+    while (sfxCacheBytes > limitBytes && sfxCache.size > 0) {
+      const oldestKey = sfxCache.keys().next().value;
+      const entry = sfxCache.get(oldestKey);
+      sfxCache.delete(oldestKey);
+      if (entry) sfxCacheBytes = Math.max(0, sfxCacheBytes - entry.bytes);
     }
   }
 
-  function getCachedAudioBuffer(url) {
-    if (!url || !sfxLruCache.has(url)) return null;
-    const entry = sfxLruCache.get(url);
-    sfxLruCache.delete(url);
-    sfxLruCache.set(url, entry);
+  function getCachedSfx(key) {
+    if (!key || !sfxCache.has(key)) return null;
+    const entry = sfxCache.get(key);
+    sfxCache.delete(key);
+    sfxCache.set(key, entry);
     return entry.buffer;
   }
 
-  function putCachedAudioBuffer(url, buffer, bytes) {
-    if (!url || !buffer || !(bytes > 0)) return;
-    if (sfxLruCache.has(url)) {
-      const old = sfxLruCache.get(url);
-      lruPcmBytes = Math.max(0, lruPcmBytes - old.bytes);
-      sfxLruCache.delete(url);
+  function putCachedSfx(key, audioBuf) {
+    if (!key || !audioBuf) return;
+    const pcmBytes = (audioBuf.length || 0) * (audioBuf.numberOfChannels || 1) * 4;
+    if (pcmBytes <= 0 || pcmBytes > 8 * 1024 * 1024) return;
+    if (sfxCache.has(key)) {
+      const prev = sfxCache.get(key);
+      sfxCache.delete(key);
+      if (prev) sfxCacheBytes = Math.max(0, sfxCacheBytes - prev.bytes);
     }
-    trimLruCacheTo(Math.max(0, MAX_LRU_PCM_BYTES - bytes));
-    sfxLruCache.set(url, { buffer: buffer, bytes: bytes });
-    lruPcmBytes += bytes;
+    trimSfxCache(maxSfxCacheBytes - pcmBytes);
+    sfxCache.set(key, { buffer: audioBuf, bytes: pcmBytes });
+    sfxCacheBytes += pcmBytes;
+  }
+
+  if (isIOS && bufferUrlMap) {
+    if (typeof window.fetch === "function") {
+      const origFetch = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : (input && input.url ? input.url : "");
+        return origFetch(input, init).then(function (resp) {
+          if (url && /\.(ogg|mp3|wav|m4a)(\?|$)/i.test(url) && typeof resp.arrayBuffer === "function") {
+            const origAb = resp.arrayBuffer.bind(resp);
+            resp.arrayBuffer = function () {
+              return origAb().then(function (buf) {
+                if (buf && typeof buf === "object") {
+                  try { bufferUrlMap.set(buf, url); } catch (_) {}
+                }
+                return buf;
+              });
+            };
+          }
+          return resp;
+        });
+      };
+    }
+
+    if (typeof window.XMLHttpRequest === "function") {
+      const XHRProto = window.XMLHttpRequest.prototype;
+      const origOpen = XHRProto.open;
+      const origSend = XHRProto.send;
+      XHRProto.open = function (method, url) {
+        this.__gardendlessUrl = typeof url === "string" ? url : "";
+        return origOpen.apply(this, arguments);
+      };
+      XHRProto.send = function () {
+        this.addEventListener("load", function () {
+          try {
+            if (this.responseType === "arraybuffer" && this.response && this.__gardendlessUrl) {
+              bufferUrlMap.set(this.response, this.__gardendlessUrl);
+            }
+          } catch (_) {}
+        });
+        return origSend.apply(this, arguments);
+      };
+    }
   }
 
   function whenActive() {
@@ -60,16 +115,17 @@
 
   class TrackedAudioContext extends Base {
     constructor(...args) {
-      if (typeof Base.prototype.decodeAudioData === "function" && (!args[0] || typeof args[0] !== "object" || !args[0].sampleRate)) {
-        const patchedOpts = Object.assign({}, args[0] || {}, { sampleRate: TARGET_SAMPLE_RATE });
-        try {
-          super(patchedOpts);
-        } catch (_) {
-          super(...args);
+      let opts = args[0];
+      if (isIOS) {
+        if (!opts || typeof opts !== "object") {
+          opts = { sampleRate: 24000, latencyHint: "interactive" };
+          args[0] = opts;
+        } else if (!opts.sampleRate) {
+          opts = Object.assign({}, opts, { sampleRate: 24000 });
+          args[0] = opts;
         }
-      } else {
-        super(...args);
       }
+      super(...args);
       contexts.add(this);
       this.addEventListener("statechange", () => {
         if (this.state === "closed") contexts.delete(this);
@@ -78,6 +134,161 @@
   }
   window.AudioContext = TrackedAudioContext;
   if (window.webkitAudioContext === Base) window.webkitAudioContext = TrackedAudioContext;
+
+  if (typeof window.addEventListener === "function") {
+    const closeAllContexts = function () {
+      sfxCache.clear();
+      sfxCacheBytes = 0;
+      contexts.forEach(function (ctx) {
+        try {
+          if (typeof ctx.close === "function" && ctx.state !== "closed") {
+            ctx.close().catch(function () {});
+          }
+        } catch (_) {}
+      });
+      contexts.clear();
+    };
+    window.addEventListener("pagehide", closeAllContexts);
+    window.addEventListener("beforeunload", closeAllContexts);
+  }
+
+  if (isIOS && typeof nativeDecode === "function") {
+    Base.prototype.decodeAudioData = function (audioData, successCallback, errorCallback) {
+      const ctx = this;
+      const byteLen = audioData ? (audioData.byteLength || 0) : 0;
+      const taggedUrl = (bufferUrlMap && audioData) ? bufferUrlMap.get(audioData) : null;
+
+      // Stream BGM / long audio (> 56 KB) via <audio> instead of decoding into 20 MB of Float32 PCM RAM.
+      if (byteLen > streamThresholdBytes && typeof ctx.createBuffer === "function") {
+        try {
+          const proxyBuffer = ctx.createBuffer(1, 24000, ctx.sampleRate || 24000);
+          if (taggedUrl) {
+            proxyBuffer.__gardendlessStreamUrl = taggedUrl;
+          } else if (typeof Blob !== "undefined" && typeof URL !== "undefined" && URL.createObjectURL) {
+            proxyBuffer.__gardendlessStreamUrl = URL.createObjectURL(new Blob([audioData]));
+          }
+          if (typeof successCallback === "function") {
+            Promise.resolve(proxyBuffer).then(successCallback);
+          }
+          return Promise.resolve(proxyBuffer);
+        } catch (_) {}
+      }
+
+      // Check LRU decoded SFX cache first so repeated zombie/plant sounds cost 0 CPU & 0 extra RAM.
+      const cacheKey = taggedUrl ? ("url:" + taggedUrl) : null;
+      const cached = getCachedSfx(cacheKey);
+      if (cached) {
+        if (typeof successCallback === "function") {
+          Promise.resolve(cached).then(successCallback);
+        }
+        return Promise.resolve(cached);
+      }
+
+      const promise = nativeDecode.call(ctx, audioData, function (decoded) {
+        if (cacheKey && decoded) putCachedSfx(cacheKey, decoded);
+        if (typeof successCallback === "function") successCallback(decoded);
+      }, errorCallback);
+
+      if (promise && typeof promise.then === "function") {
+        return promise.then(function (decoded) {
+          if (cacheKey && decoded) putCachedSfx(cacheKey, decoded);
+          return decoded;
+        });
+      }
+      return promise;
+    };
+
+    const origCreateBufferSource = Base.prototype.createBufferSource;
+    if (typeof origCreateBufferSource === "function" && typeof Audio !== "undefined") {
+      const activeStreams = [];
+      const maxStreams = 12;
+
+      function acquireStreamElement(url, shouldLoop) {
+        for (let i = 0; i < activeStreams.length; i++) {
+          const item = activeStreams[i];
+          if (item.paused && item.__geUrl === url) {
+            activeStreams.splice(i, 1);
+            activeStreams.push(item);
+            return item;
+          }
+        }
+        for (let i = 0; i < activeStreams.length; i++) {
+          const item = activeStreams[i];
+          if (item.paused) {
+            activeStreams.splice(i, 1);
+            item.__geUrl = url;
+            item.src = url;
+            activeStreams.push(item);
+            return item;
+          }
+        }
+        if (activeStreams.length >= maxStreams) {
+          // Never evict a currently playing looping BGM track for a one-shot stream!
+          let victimIdx = activeStreams.findIndex(function (el) { return !el.loop; });
+          if (victimIdx === -1 && shouldLoop) victimIdx = 0;
+          if (victimIdx !== -1) {
+            const oldest = activeStreams.splice(victimIdx, 1)[0];
+            try { nativePause.call(oldest); } catch (_) {}
+            oldest.__geUrl = url;
+            oldest.src = url;
+            activeStreams.push(oldest);
+            return oldest;
+          }
+        }
+        const el = new Audio();
+        el.preload = "auto";
+        el.__geUrl = url;
+        el.src = url;
+        activeStreams.push(el);
+        return el;
+      }
+
+      Base.prototype.createBufferSource = function () {
+        const sourceNode = origCreateBufferSource.apply(this, arguments);
+        let streamEl = null;
+        const origStart = sourceNode.start.bind(sourceNode);
+        const origStop = sourceNode.stop.bind(sourceNode);
+
+        sourceNode.start = function (when, offset) {
+          const buf = sourceNode.buffer;
+          if (buf && buf.__gardendlessStreamUrl) {
+            try {
+              streamEl = acquireStreamElement(buf.__gardendlessStreamUrl, Boolean(sourceNode.loop));
+              streamEl.loop = Boolean(sourceNode.loop);
+              if (typeof offset === "number" && offset > 0) {
+                try { streamEl.currentTime = offset; } catch (_) {}
+              } else {
+                try { streamEl.currentTime = 0; } catch (_) {}
+              }
+              streamEl.onended = function () {
+                if (typeof sourceNode.onended === "function") {
+                  try { sourceNode.onended(new Event("ended")); } catch (_) {}
+                }
+                try { sourceNode.dispatchEvent(new Event("ended")); } catch (_) {}
+              };
+              streamEl.play().catch(function () {});
+              return;
+            } catch (_) {}
+          }
+          return origStart.apply(this, arguments);
+        };
+
+        sourceNode.stop = function () {
+          if (streamEl) {
+            try {
+              nativePause.call(streamEl);
+              streamEl.onended = null;
+            } catch (_) {}
+            streamEl = null;
+            return;
+          }
+          return origStop.apply(this, arguments);
+        };
+
+        return sourceNode;
+      };
+    }
+  }
 
   Base.prototype.resume = function () {
     const context = this;
@@ -97,6 +308,8 @@
     if (isActive === active) return;
     active = isActive;
     if (!active) {
+      // Trim cached SFX buffers to 18 MB when backgrounded so iOS Jetsam never reaps the app.
+      trimSfxCache(18 * 1024 * 1024);
       contexts.forEach(context => {
         if (context.state !== "running") return;
         suspendedContexts.add(context);
@@ -107,8 +320,6 @@
         pausedMedia.add(element);
         nativePause.call(element);
       });
-      // Trim older cached SFX when app goes to background so iOS Jetsam never kills suspended WebView
-      trimLruCacheTo(BG_TRIM_LRU_PCM_BYTES);
       return;
     }
     waiting.splice(0).forEach(resolve => resolve());
@@ -117,619 +328,4 @@
     pausedMedia.forEach(element => nativePlay.call(element).catch(() => {}));
     pausedMedia.clear();
   };
-
-  // --- Deduplicate repetitive mod console.warn / console.error spam to reduce native bridge IPC & disk heat ---
-  if (typeof window.console === "object" && window.console) {
-    const warnCounts = new Map();
-    ["warn", "error"].forEach(function (level) {
-      const origFn = window.console[level];
-      if (typeof origFn !== "function") return;
-      window.console[level] = function () {
-        if (arguments.length > 0 && typeof arguments[0] === "string") {
-          const key = arguments[0].slice(0, 160);
-          const count = (warnCounts.get(key) || 0) + 1;
-          warnCounts.set(key, count);
-          if (warnCounts.size > 200) warnCounts.clear();
-          // Allow the first 2 occurrences, then throttle identical spam to 1 every 200 occurrences
-          if (count > 2 && (count % 200) !== 0) {
-            return;
-          }
-        }
-        return origFn.apply(this, arguments);
-      };
-    });
-  }
-
-  // --- Track XHR & fetch audio URLs (including synchronous XHR.response getter!) ---
-  if (typeof window.XMLHttpRequest === "function") {
-    const XHR = window.XMLHttpRequest;
-    const origOpen = XHR.prototype.open;
-    const respDesc = Object.getOwnPropertyDescriptor(XHR.prototype, "response");
-
-    XHR.prototype.open = function (method, url) {
-      this.__gardendlessReqUrl = typeof url === "string" ? url : String(url || "");
-      this.addEventListener("readystatechange", function () {
-        if (this.readyState === 4) {
-          try {
-            if ((!this.responseType || this.responseType === "arraybuffer") && this.response instanceof ArrayBuffer && this.__gardendlessReqUrl) {
-              this.response.__gardendlessAudioUrl = this.responseURL || this.__gardendlessReqUrl;
-            }
-          } catch (_) {}
-        }
-      });
-      return origOpen.apply(this, arguments);
-    };
-
-    if (respDesc && typeof respDesc.get === "function") {
-      Object.defineProperty(XHR.prototype, "response", {
-        configurable: true,
-        enumerable: respDesc.enumerable,
-        get: function () {
-          const val = respDesc.get.call(this);
-          try {
-            if (val instanceof ArrayBuffer && !val.__gardendlessAudioUrl && (this.responseURL || this.__gardendlessReqUrl)) {
-              val.__gardendlessAudioUrl = this.responseURL || this.__gardendlessReqUrl;
-            }
-          } catch (_) {}
-          return val;
-        }
-      });
-    }
-  }
-
-  if (typeof window.fetch === "function") {
-    const origFetch = window.fetch;
-    window.fetch = function (input) {
-      const reqUrl = typeof input === "string" ? input : (input && input.url ? input.url : "");
-      return origFetch.apply(this, arguments).then(function (response) {
-        if (reqUrl && response && typeof response.arrayBuffer === "function") {
-          const origAb = response.arrayBuffer;
-          response.arrayBuffer = function () {
-            return origAb.apply(this, arguments).then(function (ab) {
-              if (ab instanceof ArrayBuffer) {
-                ab.__gardendlessAudioUrl = response.url || reqUrl;
-              }
-              return ab;
-            });
-          };
-        }
-        return response;
-      });
-    };
-  }
-
-  function sniffAudioMime(arrayBuffer) {
-    try {
-      const u = new Uint8Array(arrayBuffer, 0, Math.min(16, arrayBuffer.byteLength));
-      if (u.length >= 8 && u[4] === 0x66 && u[5] === 0x74 && u[6] === 0x79 && u[7] === 0x70) {
-        return "audio/mp4";
-      }
-      if (u.length >= 4 && u[0] === 0x4F && u[1] === 0x67 && u[2] === 0x67 && u[3] === 0x53) {
-        return "audio/ogg";
-      }
-      if (u.length >= 4 && u[0] === 0x52 && u[1] === 0x49 && u[2] === 0x46 && u[3] === 0x46) {
-        return "audio/wav";
-      }
-      if (u.length >= 2 && u[0] === 0xFF && (u[1] & 0xF6) === 0xF0) {
-        return "audio/aac";
-      }
-    } catch (_) {}
-    return "audio/mpeg";
-  }
-
-  // --- Protected 12-stream HTML5 <audio> pool with URL reuse ---
-  const streamPool = [];
-  const MAX_STREAM_ELEMENTS = 12;
-  const blobUrlRing = [];
-  const MAX_BLOB_URLS = 6;
-
-  function registerBlobUrl(url) {
-    if (!url) return null;
-    blobUrlRing.push(url);
-    while (blobUrlRing.length > MAX_BLOB_URLS) {
-      const old = blobUrlRing.shift();
-      try { URL.revokeObjectURL(old); } catch (_) {}
-    }
-    return url;
-  }
-
-  function acquireAudioStream(streamUrl, isLoop, volume) {
-    let item = null;
-    for (let i = 0; i < streamPool.length; i++) {
-      if ((streamPool[i].paused || streamPool[i].ended) && !streamPool[i].__gardendlessPlayPending && streamPool[i].__gardendlessLoadedUrl === streamUrl) {
-        item = streamPool[i];
-        break;
-      }
-    }
-    if (!item) {
-      for (let i = 0; i < streamPool.length; i++) {
-        if ((streamPool[i].paused || streamPool[i].ended) && !streamPool[i].__gardendlessPlayPending) {
-          item = streamPool[i];
-          break;
-        }
-      }
-    }
-    if (!item && streamPool.length < MAX_STREAM_ELEMENTS && typeof window.Audio === "function") {
-      item = new window.Audio();
-      item.preload = "auto";
-      streamPool.push(item);
-    }
-    if (!item && streamPool.length > 0) {
-      let victimIdx = -1;
-      for (let i = 0; i < streamPool.length; i++) {
-        if (!streamPool[i].loop) {
-          victimIdx = i;
-          break;
-        }
-      }
-      if (victimIdx === -1 && isLoop) {
-        victimIdx = 0;
-      }
-      if (victimIdx !== -1) {
-        item = streamPool.splice(victimIdx, 1)[0];
-        try { nativePause.call(item); } catch (_) {}
-        streamPool.push(item);
-      }
-    }
-    if (!item) return null;
-    if (item.__gardendlessVolTimer) {
-      clearInterval(item.__gardendlessVolTimer);
-      item.__gardendlessVolTimer = null;
-    }
-    if (item.__gardendlessLoadedUrl !== streamUrl) {
-      item.src = streamUrl;
-      item.__gardendlessLoadedUrl = streamUrl;
-    } else {
-      try { item.currentTime = 0; } catch (_) {}
-    }
-    item.loop = !!isLoop;
-    item.volume = typeof volume === "number" && Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
-    return item;
-  }
-
-  const OrigSourceNode = window.AudioBufferSourceNode;
-  const OrigAudioNode = window.AudioNode;
-
-  if (OrigAudioNode && OrigAudioNode.prototype && typeof OrigAudioNode.prototype.connect === "function") {
-    const origNodeConnect = OrigAudioNode.prototype.connect;
-    OrigAudioNode.prototype.connect = function (dest) {
-      try {
-        if (dest && dest.gain && typeof dest.gain.value === "number") {
-          if (OrigSourceNode && this instanceof OrigSourceNode) {
-            this.__gardendlessGainNode = dest;
-          } else if (this && this.gain && typeof this.gain.value === "number" && this !== dest) {
-            this.__gardendlessNextGain = dest;
-          }
-        }
-      } catch (_) {}
-      return origNodeConnect.apply(this, arguments);
-    };
-  }
-
-  function computeEffectiveVolume(sourceNode) {
-    let vol = 1.0;
-    let foundGain = false;
-    let node = sourceNode && sourceNode.__gardendlessGainNode;
-    let depth = 0;
-    while (node && depth < 6) {
-      if (node.gain && typeof node.gain.value === "number" && Number.isFinite(node.gain.value)) {
-        vol *= Math.max(0, Math.min(1, node.gain.value));
-        foundGain = true;
-      }
-      node = node.__gardendlessNextGain;
-      depth++;
-    }
-    return foundGain ? Math.max(0, Math.min(1, vol)) : 1.0;
-  }
-
-  if (OrigSourceNode && OrigSourceNode.prototype) {
-    const origConnect = OrigSourceNode.prototype.connect;
-    const origStart = OrigSourceNode.prototype.start;
-    const origStop = OrigSourceNode.prototype.stop;
-
-    OrigSourceNode.prototype.connect = function (dest) {
-      if (dest && dest.gain && typeof dest.gain.value === "number") {
-        this.__gardendlessGainNode = dest;
-      }
-      return origConnect.apply(this, arguments);
-    };
-
-    OrigSourceNode.prototype.start = function (when, offset) {
-      const buf = this.buffer;
-      if (buf && (buf.__gardendlessStreamUrl || buf.__gardendlessBlobBytes)) {
-        const self = this;
-        let url = buf.__gardendlessStreamUrl;
-        if (!url && buf.__gardendlessBlobBytes && typeof Blob !== "undefined" && typeof URL !== "undefined") {
-          try {
-            const mime = buf.__gardendlessMime || "audio/mp4";
-            url = registerBlobUrl(URL.createObjectURL(new Blob([buf.__gardendlessBlobBytes], { type: mime })));
-            buf.__gardendlessStreamUrl = url;
-          } catch (_) {}
-        }
-        if (url) {
-          let initVol = computeEffectiveVolume(self);
-          if (initVol <= 0.0001) initVol = 1.0;
-          const audio = acquireAudioStream(url, self.loop, initVol);
-          if (audio) {
-            self.__gardendlessAudio = audio;
-            self.__gardendlessStopRequested = false;
-            if (!buf.__gardendlessMetaObserved) {
-              buf.__gardendlessMetaObserved = true;
-              audio.addEventListener("loadedmetadata", function onMeta() {
-                audio.removeEventListener("loadedmetadata", onMeta);
-                if (Number.isFinite(audio.duration) && audio.duration > 0) {
-                  buf.__gardendlessDuration = audio.duration;
-                }
-              });
-            }
-            if (typeof offset === "number" && offset > 0) {
-              try { audio.currentTime = offset; } catch (_) {}
-            }
-            const fireEnded = function () {
-              if (audio.__gardendlessVolTimer) {
-                clearInterval(audio.__gardendlessVolTimer);
-                audio.__gardendlessVolTimer = null;
-              }
-              if (typeof self.onended === "function") {
-                try { self.onended(new Event("ended")); } catch (_) {}
-              }
-              if (typeof self.dispatchEvent === "function") {
-                try { self.dispatchEvent(new Event("ended")); } catch (_) {}
-              }
-            };
-            audio.onended = function () {
-              if (!self.loop) fireEnded();
-            };
-            if (self.loop) {
-              audio.__gardendlessVolTimer = setInterval(function () {
-                if (audio.paused || audio.ended || self.__gardendlessAudio !== audio) {
-                  clearInterval(audio.__gardendlessVolTimer);
-                  audio.__gardendlessVolTimer = null;
-                  return;
-                }
-                audio.loop = !!self.loop;
-                const currentVol = computeEffectiveVolume(self);
-                if (currentVol > 0.0001) {
-                  audio.volume = currentVol;
-                }
-              }, 500);
-            }
-            audio.__gardendlessPlayPending = true;
-            const p = Media.prototype.play.call(audio);
-            if (p && typeof p.then === "function") {
-              p.then(
-                function () {
-                  audio.__gardendlessPlayPending = false;
-                  if (self.__gardendlessStopRequested && self.__gardendlessAudio === audio) {
-                    self.__gardendlessAudio = null;
-                    try { nativePause.call(audio); } catch (_) {}
-                  }
-                },
-                function () {
-                  audio.__gardendlessPlayPending = false;
-                  setTimeout(fireEnded, 50);
-                }
-              );
-            } else {
-              audio.__gardendlessPlayPending = false;
-            }
-            return;
-          }
-        }
-      }
-      return origStart.apply(this, arguments);
-    };
-
-    OrigSourceNode.prototype.stop = function () {
-      if (this.__gardendlessAudio) {
-        const audio = this.__gardendlessAudio;
-        if (audio.__gardendlessVolTimer) {
-          clearInterval(audio.__gardendlessVolTimer);
-          audio.__gardendlessVolTimer = null;
-        }
-        try { audio.onended = null; } catch (_) {}
-        if (audio.__gardendlessPlayPending) {
-          this.__gardendlessStopRequested = true;
-        } else {
-          this.__gardendlessAudio = null;
-          try { nativePause.call(audio); } catch (_) {}
-        }
-        if (typeof this.onended === "function") {
-          try { this.onended(new Event("ended")); } catch (_) {}
-        }
-        if (typeof this.dispatchEvent === "function") {
-          try { this.dispatchEvent(new Event("ended")); } catch (_) {}
-        }
-        return;
-      }
-      return origStop.apply(this, arguments);
-    };
-  }
-
-  // --- Intercept decodeAudioData: Offload > 56KB to <audio> & 34MB URL-keyed LRU cache for <= 56KB SFX ---
-  if (typeof Base.prototype.decodeAudioData === "function") {
-    const origDecode = Base.prototype.decodeAudioData;
-    const decodeQueue = [];
-    let activeDecodes = 0;
-
-    function createPlaceholderBuffer(ctx, streamUrl, blobBytes, mime, byteLen) {
-      if (!streamUrl && !blobBytes && ctx.__gardendlessSilentBuffer) {
-        return ctx.__gardendlessSilentBuffer;
-      }
-      const sr = ctx.sampleRate || TARGET_SAMPLE_RATE;
-      const len = Math.max(1600, Math.floor(sr * 0.1));
-      const estDuration = byteLen > 0 ? Math.max(4.0, Math.round((byteLen / 16000) * 10) / 10) : 0.1;
-      const buf = typeof ctx.createBuffer === "function"
-        ? ctx.createBuffer(1, len, sr)
-        : { duration: estDuration, length: len, numberOfChannels: 1, sampleRate: sr };
-      if (streamUrl || blobBytes) {
-        buf.__gardendlessStreamUrl = streamUrl || null;
-        buf.__gardendlessBlobBytes = blobBytes || null;
-        buf.__gardendlessMime = mime || "audio/mp4";
-        buf.__gardendlessDuration = estDuration;
-        try {
-          Object.defineProperty(buf, "duration", {
-            configurable: true,
-            get: function () { return this.__gardendlessDuration || estDuration; }
-          });
-        } catch (_) {}
-      } else {
-        ctx.__gardendlessSilentBuffer = buf;
-      }
-      return buf;
-    }
-
-    function pumpDecodeQueue() {
-      while (activeDecodes < MAX_CONCURRENT_AUDIO_DECODES && decodeQueue.length > 0) {
-        const job = decodeQueue.shift();
-        activeDecodes++;
-        runDecodeJob(job);
-      }
-    }
-
-    function runDecodeJob(job) {
-      const self = job.ctx;
-      const arrayBuffer = job.arrayBuffer;
-      const directUrl = job.directUrl;
-      const successCallback = job.successCallback;
-      const errorCallback = job.errorCallback;
-      const resolve = job.resolve;
-      const reject = job.reject;
-
-      if (!directUrl && uncachedPcmBytes >= MAX_UNCACHED_PCM_BYTES) {
-        activeDecodes--;
-        pumpDecodeQueue();
-        const silent = createPlaceholderBuffer(self, null, null, null, 0);
-        if (typeof successCallback === "function") {
-          try { successCallback(silent); } catch (_) {}
-        }
-        resolve(silent);
-        return;
-      }
-
-      let settled = false;
-      const onSuccess = function (decodedBuffer) {
-        if (settled) return;
-        settled = true;
-        activeDecodes--;
-        if (decodedBuffer && typeof decodedBuffer.length === "number") {
-          const bytes = decodedBuffer.length * (decodedBuffer.numberOfChannels || 1) * 4;
-          if (directUrl) {
-            putCachedAudioBuffer(directUrl, decodedBuffer, bytes);
-          } else {
-            uncachedPcmBytes += bytes;
-          }
-        }
-        pumpDecodeQueue();
-        if (typeof successCallback === "function") {
-          try { successCallback(decodedBuffer); } catch (_) {}
-        }
-        resolve(decodedBuffer);
-      };
-
-      const onError = function (err) {
-        if (settled) return;
-        settled = true;
-        activeDecodes--;
-        pumpDecodeQueue();
-        if (typeof errorCallback === "function") {
-          try { errorCallback(err); } catch (_) {}
-        }
-        reject(err);
-      };
-
-      try {
-        const p = origDecode.call(self, arrayBuffer, onSuccess, onError);
-        if (p && typeof p.then === "function") {
-          p.then(onSuccess, onError);
-        }
-      } catch (e) {
-        onError(e);
-      }
-    }
-
-    Base.prototype.decodeAudioData = function (arrayBuffer, successCallback, errorCallback) {
-      const self = this;
-      if (!(self instanceof Base)) {
-        return origDecode.apply(self, arguments);
-      }
-      const byteLen = arrayBuffer && typeof arrayBuffer.byteLength === "number" ? arrayBuffer.byteLength : 0;
-      const directUrl = (arrayBuffer && arrayBuffer.__gardendlessAudioUrl) || null;
-
-      if (byteLen > STREAM_AUDIO_OVER_BYTES) {
-        const mime = sniffAudioMime(arrayBuffer);
-        let blobBytes = null;
-        if (!directUrl) {
-          try {
-            blobBytes = arrayBuffer.slice ? arrayBuffer.slice(0) : new Uint8Array(arrayBuffer);
-          } catch (_) {}
-        }
-        const placeholder = createPlaceholderBuffer(self, directUrl, blobBytes, mime, byteLen);
-        if (typeof successCallback === "function") {
-          setTimeout(function () {
-            try { successCallback(placeholder); } catch (_) {}
-          }, 0);
-        }
-        return Promise.resolve(placeholder);
-      }
-
-      if (directUrl) {
-        const cached = getCachedAudioBuffer(directUrl);
-        if (cached) {
-          if (typeof successCallback === "function") {
-            setTimeout(function () {
-              try { successCallback(cached); } catch (_) {}
-            }, 0);
-          }
-          return Promise.resolve(cached);
-        }
-      }
-
-      return new Promise(function (resolve, reject) {
-        decodeQueue.push({
-          ctx: self,
-          arrayBuffer: arrayBuffer,
-          directUrl: directUrl,
-          successCallback: successCallback,
-          errorCallback: errorCallback,
-          resolve: resolve,
-          reject: reject
-        });
-        pumpDecodeQueue();
-      });
-    };
-  }
-
-  // --- CRITICAL TEXTURE & VRAM OPTIMIZER ---
-  if (typeof window.createImageBitmap === "function") {
-    const origCreateImageBitmap = window.createImageBitmap;
-    const bitmapQueue = [];
-    let activeBitmaps = 0;
-    const MAX_CONCURRENT_BITMAPS = 2;
-
-    function pumpBitmapQueue() {
-      while (activeBitmaps < MAX_CONCURRENT_BITMAPS && bitmapQueue.length > 0) {
-        const task = bitmapQueue.shift();
-        activeBitmaps++;
-        Promise.resolve()
-          .then(function () { return origCreateImageBitmap.apply(window, task.args); })
-          .then(
-            function (bmp) { activeBitmaps--; pumpBitmapQueue(); task.resolve(bmp); },
-            function (err) { activeBitmaps--; pumpBitmapQueue(); task.reject(err); }
-          );
-      }
-    }
-
-    window.createImageBitmap = function () {
-      const args = Array.prototype.slice.call(arguments);
-      return new Promise(function (resolve, reject) {
-        bitmapQueue.push({ args: args, resolve: resolve, reject: reject });
-        pumpBitmapQueue();
-      });
-    };
-  }
-
-  function releaseTextureSourceCpuMemory(source) {
-    if (!source || source.__gardendlessCpuReleased) return;
-    if (typeof source.close === "function") {
-      const w = source.width || 0;
-      const h = source.height || 0;
-      if (w < 32 && h < 32) return;
-      source.__gardendlessCpuReleased = true;
-      setTimeout(function () {
-        try {
-          Object.defineProperty(source, "width", { value: w, configurable: true });
-          Object.defineProperty(source, "height", { value: h, configurable: true });
-          source.close();
-        } catch (_) {}
-      }, 16);
-      return;
-    }
-    if (typeof window.HTMLImageElement === "function" && source instanceof window.HTMLImageElement) {
-      const w = source.naturalWidth || source.width || 0;
-      const h = source.naturalHeight || source.height || 0;
-      if (w < 128 && h < 128) return;
-      source.__gardendlessCpuReleased = true;
-      setTimeout(function () {
-        try {
-          Object.defineProperty(source, "width", { value: w, configurable: true });
-          Object.defineProperty(source, "height", { value: h, configurable: true });
-          Object.defineProperty(source, "naturalWidth", { value: w, configurable: true });
-          Object.defineProperty(source, "naturalHeight", { value: h, configurable: true });
-          source.removeAttribute("src");
-        } catch (_) {}
-      }, 200);
-    }
-  }
-
-  if (typeof window.HTMLCanvasElement === "function" && window.HTMLCanvasElement.prototype) {
-    const origGetContext = window.HTMLCanvasElement.prototype.getContext;
-    if (typeof origGetContext === "function") {
-      window.HTMLCanvasElement.prototype.getContext = function (type) {
-        const ctx = origGetContext.apply(this, arguments);
-        if (ctx && (type === "webgl2" || type === "webgl" || type === "experimental-webgl")) {
-          trackedGlContexts.add(ctx);
-        }
-        return ctx;
-      };
-    }
-  }
-
-  [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach(function (GLCtor) {
-    if (!GLCtor || !GLCtor.prototype) return;
-
-    if (typeof GLCtor.prototype.texStorage2D === "function") {
-      const origTexStorage2D = GLCtor.prototype.texStorage2D;
-      GLCtor.prototype.texStorage2D = function (target, levels, internalformat, width, height) {
-        if (internalformat === 0x8058 && width >= 256 && height >= 256) {
-          internalformat = 0x8056;
-        }
-        return origTexStorage2D.call(this, target, levels, internalformat, width, height);
-      };
-    }
-
-    ["texImage2D", "texSubImage2D"].forEach(function (method) {
-      const origMethod = GLCtor.prototype[method];
-      if (typeof origMethod !== "function") return;
-      GLCtor.prototype[method] = function () {
-        const lastArg = arguments[arguments.length - 1];
-        const res = origMethod.apply(this, arguments);
-        if (lastArg && typeof lastArg === "object") {
-          releaseTextureSourceCpuMemory(lastArg);
-        }
-        return res;
-      };
-    });
-  });
-
-  if (typeof window.addEventListener === "function") {
-    const cleanupOnReload = function () {
-      try {
-        sfxLruCache.clear();
-        lruPcmBytes = 0;
-        uncachedPcmBytes = 0;
-        streamPool.forEach(function (a) {
-          try {
-            nativePause.call(a);
-            a.removeAttribute("src");
-            a.load();
-          } catch (_) {}
-        });
-        streamPool.length = 0;
-        contexts.forEach(function (ctx) {
-          try { if (typeof ctx.close === "function") ctx.close(); } catch (_) {}
-        });
-        contexts.clear();
-        trackedGlContexts.forEach(function (gl) {
-          try {
-            const ext = typeof gl.getExtension === "function" ? gl.getExtension("WEBGL_lose_context") : null;
-            if (ext && typeof ext.loseContext === "function") ext.loseContext();
-          } catch (_) {}
-        });
-        trackedGlContexts.clear();
-      } catch (_) {}
-    };
-    window.addEventListener("beforeunload", cleanupOnReload);
-    window.addEventListener("pagehide", cleanupOnReload);
-  }
 })();

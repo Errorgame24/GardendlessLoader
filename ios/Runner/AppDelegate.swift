@@ -32,7 +32,7 @@ import UIKit
   private var pendingImportTargetDirectory: String?
   private var zipImportInProgress = false
   private var gameLaunchInProgress = false
-  /// A ZIP another app opened or shared with the loader. It waits here while
+  /// A ZIP or EXE another app opened or shared with the loader. It waits here while
   /// the game runs and until the launcher imports or discards it.
   private var incomingZip: IncomingZip?
   private var shortcutChannel: FlutterMethodChannel?
@@ -339,7 +339,7 @@ import UIKit
     }
   }
 
-  /// Keeps the latest ZIP opened or shared with the loader; a running
+  /// Keeps the latest ZIP/EXE opened or shared with the loader; a running
   /// launcher is told at once, otherwise it asks when it starts.
   func receiveIncomingZip(_ context: UIOpenURLContext) {
     incomingZip?.discard()
@@ -372,7 +372,7 @@ import UIKit
       result(
         FlutterError(
           code: "zip_import_busy",
-          message: "已有 ZIP 导入选择正在进行",
+          message: "已有资源导入正在进行",
           details: nil
         )
       )
@@ -469,7 +469,7 @@ import UIKit
         result(
           FlutterError(
             code: "zip_picker_failed",
-            message: "Unable to present ZIP picker",
+            message: "Unable to present document picker",
             details: nil
           )
         )
@@ -479,14 +479,15 @@ import UIKit
         result(
           FlutterError(
             code: "zip_import_busy",
-            message: "已有 ZIP 导入选择正在进行",
+            message: "已有资源导入选择正在进行",
             details: nil
           )
         )
         return
       }
+      // Allow picking both standard .zip archives and Windows Tauri .exe binaries.
       let picker = UIDocumentPickerViewController(
-        forOpeningContentTypes: [UTType.zip],
+        forOpeningContentTypes: [UTType.zip, UTType.exe, UTType.data, UTType.item],
         asCopy: true
       )
       picker.delegate = self
@@ -524,15 +525,22 @@ import UIKit
         }
       }
       do {
-        let session = ZipImportSession(
-          zipURL: zipURL,
-          targetDirectory: URL(
-            fileURLWithPath: targetDirectory,
-            isDirectory: true
+        if Self.isWindowsExecutable(url: zipURL) {
+          try self.runTauriExeImport(
+            exeURL: zipURL,
+            targetDirectory: targetDirectory
           )
-        )
-        _ = try session.run { [weak self] progress in
-          self?.reportImportProgress(progress)
+        } else {
+          let session = ZipImportSession(
+            zipURL: zipURL,
+            targetDirectory: URL(
+              fileURLWithPath: targetDirectory,
+              isDirectory: true
+            )
+          )
+          _ = try session.run { [weak self] progress in
+            self?.reportImportProgress(progress)
+          }
         }
         DispatchQueue.main.async {
           self.zipImportInProgress = false
@@ -544,7 +552,7 @@ import UIKit
           result(
             FlutterError(
               code: Self.zipImportErrorCode(error),
-              message: "无法导入选择的 ZIP：\(error.localizedDescription)",
+              message: "无法导入选择的资源包：\(error.localizedDescription)",
               details: nil
             )
           )
@@ -553,8 +561,136 @@ import UIKit
     }
   }
 
+  /// Checks whether the picked file is a Windows PE executable (`MZ` header or `.exe`).
+  private static func isWindowsExecutable(url: URL) -> Bool {
+    if let handle = try? FileHandle(forReadingFrom: url) {
+      defer { try? handle.close() }
+      if let data = try? handle.read(upToCount: 2),
+         data.count == 2,
+         data[0] == 0x4D,
+         data[1] == 0x5A {
+        return true
+      }
+    }
+    return url.pathExtension.lowercased() == "exe"
+  }
+
+  /// Extracts embedded Brotli frontend assets from a Tauri Windows `.exe` via `tauri-dumper` FFI.
+  private func runTauriExeImport(
+    exeURL: URL,
+    targetDirectory: String
+  ) throws {
+    let attributes = try FileManager.default.attributesOfItem(atPath: exeURL.path)
+    let sourceBytes = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+
+    // Verify at least 2.5x the input .exe size in available storage before unpacking.
+    if sourceBytes > 0 {
+      let targetParent = URL(fileURLWithPath: targetDirectory).deletingLastPathComponent()
+      let freeBytes = (try? targetParent.resourceValues(
+        forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+      ).volumeAvailableCapacityForImportantUsage) ?? 0
+      let requiredBytes = Int64(Double(sourceBytes) * 2.5)
+      if freeBytes > 0 && freeBytes < requiredBytes {
+        throw NSError(
+          domain: "GardendlessTauriImport",
+          code: -10,
+          userInfo: [
+            NSLocalizedDescriptionKey: "设备可用存储空间不足（解包 EXE 至少需要约 2.5 倍文件体积的剩余空间）"
+          ]
+        )
+      }
+    }
+
+    reportImportProgress(
+      ImportProgress(
+        phase: "receiving",
+        processedBytes: sourceBytes,
+        totalBytes: sourceBytes,
+        processedFiles: 0,
+        totalFiles: 0,
+        message: "正在解析 Tauri PE 可执行文件"
+      ),
+      force: true
+    )
+
+    let targetURL = URL(fileURLWithPath: targetDirectory, isDirectory: true)
+    if FileManager.default.fileExists(atPath: targetURL.path) {
+      let existing = (try? FileManager.default.contentsOfDirectory(
+        at: targetURL,
+        includingPropertiesForKeys: nil
+      )) ?? []
+      for item in existing {
+        try FileManager.default.removeItem(at: item)
+      }
+    } else {
+      try FileManager.default.createDirectory(
+        at: targetURL,
+        withIntermediateDirectories: true
+      )
+    }
+
+    reportImportProgress(
+      ImportProgress(
+        phase: "extracting",
+        processedBytes: 0,
+        totalBytes: sourceBytes,
+        processedFiles: 0,
+        totalFiles: 0,
+        message: "正在解压 EXE 内嵌 Brotli 资源"
+      ),
+      force: true
+    )
+
+    let exportedCount: Int32 = exeURL.path.withCString { exeCStr in
+      targetDirectory.withCString { outCStr in
+        gardendless_extract_tauri_exe(exeCStr, outCStr)
+      }
+    }
+
+    guard exportedCount > 0 else {
+      let reason: String
+      switch exportedCount {
+      case -2:
+        reason = "无法读取或内存映射该 EXE 文件"
+      case -3:
+        reason = "该 EXE 不是有效的 Tauri 构建或未检测到内嵌资源表"
+      case -4:
+        reason = "解压内嵌 Brotli 资源失败，请确认文件完整且存储空间充足"
+      case -5:
+        reason = "从 EXE 解压出的资源中缺少 index.html"
+      default:
+        reason = "解包 Tauri EXE 失败（错误码 \(exportedCount)）"
+      }
+      throw NSError(
+        domain: "GardendlessTauriImport",
+        code: Int(exportedCount),
+        userInfo: [NSLocalizedDescriptionKey: reason]
+      )
+    }
+
+    reportImportProgress(
+      ImportProgress(
+        phase: "extracting",
+        processedBytes: sourceBytes,
+        totalBytes: sourceBytes,
+        processedFiles: Int(exportedCount),
+        totalFiles: Int(exportedCount),
+        message: "已从 EXE 解压 \(exportedCount) 个资源文件"
+      ),
+      force: true
+    )
+  }
+
   /// Flutter error code naming the failure cause; it selects the launcher's fix hint.
   private static func zipImportErrorCode(_ error: Error) -> String {
+    let nsError = error as NSError
+    if nsError.domain == "GardendlessTauriImport" {
+      switch nsError.code {
+      case -3: return "zip_docs_missing"
+      case -5: return "resource_missing_index"
+      default: return "import_extract_failed"
+      }
+    }
     switch (error as? GameError)?.code {
     case .zipDocsMissing: return "zip_docs_missing"
     case .zipInvalid: return "zip_invalid"
@@ -566,9 +702,9 @@ import UIKit
     }
   }
 
-  private func reportImportProgress(_ progress: ImportProgress) {
+  private func reportImportProgress(_ progress: ImportProgress, force: Bool = false) {
     let now = DispatchTime.now().uptimeNanoseconds
-    if now - lastImportProgressReportAt < 100_000_000 {
+    if !force && now - lastImportProgressReportAt < 100_000_000 {
       return
     }
     lastImportProgressReportAt = now
@@ -597,7 +733,7 @@ import UIKit
   }
 }
 
-/// A ZIP handed over by another app. A copy the system placed in the app's
+/// A ZIP/EXE handed over by another app. A copy the system placed in the app's
 /// Inbox belongs to the loader and is removed once used; a file opened in
 /// place stays where it is.
 private struct IncomingZip {

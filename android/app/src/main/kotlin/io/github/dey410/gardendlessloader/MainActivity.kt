@@ -30,11 +30,13 @@ class MainActivity : FlutterActivity() {
     private var pendingTargetDirectory: String? = null
     private var lastImportProgressReportAt = 0L
     private var transferringToGameHost = false
-    /** A ZIP another app opened or shared, waiting for the launcher's decision. */
+    /** A ZIP or EXE another app opened or shared, waiting for the launcher's decision. */
     private var incomingZip: Uri? = null
     private var shortcutChannel: MethodChannel? = null
     /** The home-screen shortcut that opened the launcher, until Flutter takes it. */
     private var pendingShortcut: String? = null
+
+    private external fun nativeExtractTauriExe(exePath: String, outputDir: String): Int
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -134,7 +136,7 @@ class MainActivity : FlutterActivity() {
             }
 
             if (pendingResult != null) {
-                result.error("zip_import_busy", "已有 ZIP 导入选择正在进行", null)
+                result.error("zip_import_busy", "已有资源导入选择正在进行", null)
                 return@setMethodCallHandler
             }
 
@@ -218,6 +220,9 @@ class MainActivity : FlutterActivity() {
                 arrayOf(
                     "application/zip",
                     "application/x-zip-compressed",
+                    "application/x-msdownload",
+                    "application/vnd.microsoft.portable-executable",
+                    "application/x-dosexec",
                     "application/octet-stream",
                 ),
             )
@@ -296,7 +301,7 @@ class MainActivity : FlutterActivity() {
                             is ZipException -> "zip_invalid"
                             else -> "zip_import_failed"
                         },
-                        "无法导入选择的 ZIP：${error.message ?: error.toString()}",
+                        "无法导入选择的资源包：${error.message ?: error.toString()}",
                         null,
                     )
                 }
@@ -304,10 +309,108 @@ class MainActivity : FlutterActivity() {
         }.start()
     }
 
+    private fun isWindowsExecutableUri(uri: Uri): Boolean {
+        val hasMzHeader = contentResolver.openInputStream(uri)?.use { input ->
+            val header = ByteArray(2)
+            val count = input.read(header)
+            count == 2 && header[0] == 0x4D.toByte() && header[1] == 0x5A.toByte()
+        } ?: false
+        if (hasMzHeader) return true
+        return displayName(uri).lowercase(Locale.ROOT).endsWith(".exe")
+    }
+
+    private fun extractTauriExeUri(uri: Uri, targetDirectory: File, sourceBytes: Long) {
+        val storageRoot = targetDirectory.parentFile ?: filesDir
+        if (sourceBytes > 0L) {
+            val requiredBytes = (sourceBytes * 5L) / 2L
+            if (storageRoot.usableSpace in 1 until requiredBytes) {
+                throw ZipImportException(
+                    "import_extract_failed",
+                    "设备可用存储空间不足（解包 EXE 至少需要约 2.5 倍文件体积的剩余空间）",
+                )
+            }
+        }
+
+        val tempExe = File(cacheDir, "tauri_import_${System.currentTimeMillis()}.exe")
+        try {
+            var copiedBytes = 0L
+            reportImportProgress(
+                phase = "receiving",
+                processedBytes = 0,
+                totalBytes = sourceBytes,
+                message = "正在读取 Tauri EXE",
+                force = true,
+            )
+            contentResolver.openInputStream(uri)?.use { input ->
+                BufferedOutputStream(FileOutputStream(tempExe)).use { output ->
+                    val buffer = ByteArray(zipCopyBufferSize)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        copiedBytes += count
+                        reportImportProgress(
+                            phase = "receiving",
+                            processedBytes = copiedBytes,
+                            totalBytes = sourceBytes,
+                            message = "正在读取 Tauri EXE",
+                        )
+                    }
+                }
+            } ?: throw IllegalArgumentException("无法打开选择的 EXE 文件")
+
+            resetDirectory(targetDirectory)
+            reportImportProgress(
+                phase = "extracting",
+                processedBytes = 0,
+                totalBytes = copiedBytes,
+                processedFiles = 0,
+                totalFiles = 0,
+                message = "正在解析 PE 并解压内嵌 Brotli 资源",
+                force = true,
+            )
+
+            val exportedCount = nativeExtractTauriExe(
+                tempExe.absolutePath,
+                targetDirectory.absolutePath,
+            )
+            if (exportedCount <= 0) {
+                val (code, reason) = when (exportedCount) {
+                    -2 -> "import_extract_failed" to "无法读取或内存映射该 EXE 文件"
+                    -3 -> "zip_docs_missing" to "该 EXE 不是有效的 Tauri 构建或未检测到内嵌资源表"
+                    -4 -> "import_extract_failed" to "解压内嵌 Brotli 资源失败，请确认文件完整且存储空间充足"
+                    -5 -> "resource_missing_index" to "从 EXE 解压出的资源中缺少 index.html"
+                    else -> "import_extract_failed" to "解包 Tauri EXE 失败（错误码 $exportedCount）"
+                }
+                throw ZipImportException(code, reason)
+            }
+
+            reportImportProgress(
+                phase = "extracting",
+                processedBytes = copiedBytes,
+                totalBytes = copiedBytes,
+                processedFiles = exportedCount,
+                totalFiles = exportedCount,
+                message = "已从 EXE 解压 $exportedCount 个资源文件",
+                force = true,
+            )
+        } finally {
+            if (tempExe.exists()) {
+                tempExe.delete()
+            }
+        }
+    }
+
     private fun extractDocsZip(uri: Uri, targetDirectory: File) {
         val sourceBytes = contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
             descriptor.length.coerceAtLeast(0L)
         } ?: 0L
+
+        if (isWindowsExecutableUri(uri)) {
+            extractTauriExeUri(uri, targetDirectory, sourceBytes)
+            return
+        }
+
         reportImportProgress(
             phase = "receiving",
             processedBytes = 0,
@@ -547,7 +650,15 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
-        /** Intent action carrying a ZIP from [LaunchRouterActivity] or a game that held it. */
+        init {
+            try {
+                System.loadLibrary("tauri_dumper_ffi")
+            } catch (_: UnsatisfiedLinkError) {
+                // Ignored when running JVM unit tests without Android native libraries.
+            }
+        }
+
+        /** Intent action carrying a ZIP/EXE from [LaunchRouterActivity] or a game that held it. */
         const val ACTION_IMPORT_ZIP = "io.github.dey410.gardendlessloader.IMPORT_ZIP"
         const val ACTION_SHORTCUT = "io.github.dey410.gardendlessloader.SHORTCUT"
         const val EXTRA_SHORTCUT = "shortcut"
@@ -588,5 +699,5 @@ class MainActivity : FlutterActivity() {
     }
 }
 
-/** A ZIP import failure whose [code] names the cause, selecting the launcher's fix hint. */
+/** A ZIP/EXE import failure whose [code] names the cause, selecting the launcher's fix hint. */
 private class ZipImportException(val code: String, message: String) : Exception(message)

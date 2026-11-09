@@ -201,7 +201,8 @@ class _LaunchPreferences extends StatelessWidget {
           Divider(color: palette.border),
           _SegmentedSettingRow<RenderResolution>(
             key: const ValueKey('render-resolution'),
-            title: strings.renderResolution,
+            title:
+                '${strings.renderResolution} · ${controller.customRenderPercent}%',
             subtitle: strings.renderResolutionSubtitle,
             values: RenderResolution.values,
             selected: controller.renderResolution,
@@ -210,6 +211,51 @@ class _LaunchPreferences extends StatelessWidget {
             onChanged: controller.initialized
                 ? controller.setRenderResolution
                 : (_) {},
+          ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: palette.accent,
+              inactiveTrackColor: palette.surfaceMuted,
+              thumbColor: palette.accent,
+              overlayColor: palette.accent.withValues(alpha: 0.16),
+              trackHeight: 4,
+            ),
+            child: Row(
+              children: [
+                Text(
+                  '1%',
+                  style: TextStyle(color: palette.inkFaint, fontSize: 11.5),
+                ),
+                Expanded(
+                  child: Slider(
+                    key: const ValueKey('render-resolution-slider'),
+                    value: controller.customRenderPercent
+                        .clamp(1, 100)
+                        .toDouble(),
+                    min: 1,
+                    max: 100,
+                    divisions: 99,
+                    label: '${controller.customRenderPercent}%',
+                    onChanged: controller.initialized
+                        ? (val) =>
+                            controller.setCustomRenderPercent(val.round())
+                        : null,
+                  ),
+                ),
+                SizedBox(
+                  width: 42,
+                  child: Text(
+                    '${controller.customRenderPercent}%',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      color: palette.accent,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
           Divider(color: palette.border),
           _SegmentedSettingRow<ScreenFit>(
@@ -485,6 +531,7 @@ class _GuidePanel extends StatelessWidget {
                       height: 6,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
+                        color: palette.inkMuted,
                       ),
                     ),
                   ),
