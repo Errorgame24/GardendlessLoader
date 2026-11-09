@@ -22,8 +22,7 @@ public final class GpNextPathResolver {
       throw GameError.failed(.gpNextForbidden, "GP-Next 文件路径为空")
     }
     if let base = options["baseDir"] as? Int,
-       base != GpNextConstants.appDataBaseDirectoryID,
-       base != 13 /* Resource dir */ {
+       base != GpNextConstants.appDataBaseDirectoryID {
       throw GameError.failed(.gpNextForbidden, "不允许访问 Tauri baseDir \(base)")
     }
     if raw.hasPrefix("file:") {
