@@ -35,6 +35,9 @@ fn extract_tauri_exe_impl(exe_path: &Path, output_dir: &Path) -> Result<i32, i32
     // Normalize nested single-directory output if `index.html` was embedded under a prefix.
     normalize_extracted_root(output_dir);
 
+    // Flatten any nested subdirectories (e.g. data/, assets/data/) so case variations match.
+    create_case_insensitive_aliases(output_dir);
+
     if !output_dir.join("index.html").is_file() {
         return Err(-5);
     }
@@ -43,11 +46,33 @@ fn extract_tauri_exe_impl(exe_path: &Path, output_dir: &Path) -> Result<i32, i32
     Ok(exported.max(1))
 }
 
+fn create_case_insensitive_aliases(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            create_case_insensitive_aliases(&path);
+        } else if path.is_file() {
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                let lower = file_name.to_lowercase();
+                if lower != file_name {
+                    let alias = path.with_file_name(&lower);
+                    if !alias.exists() {
+                        let _ = fs::copy(&path, &alias);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn normalize_extracted_root(output_dir: &Path) {
     if output_dir.join("index.html").is_file() {
         return;
     }
-    let Some(nested_root) = find_nested_index_root(output_dir, 2) else {
+    let Some(nested_root) = find_nested_index_root(output_dir, 3) else {
         return;
     };
     if nested_root == output_dir {

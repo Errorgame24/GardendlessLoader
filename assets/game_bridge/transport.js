@@ -198,6 +198,27 @@
     return {destination: "gp-next", path: args && args.path, options: nested};
   }
 
+  async function fallbackReadStaticAsset(rawPath, asText) {
+    if (typeof rawPath !== "string" || !rawPath) throw new Error("Empty path");
+    const clean = rawPath.replace(/\\/g, "/").replace(/^\/+/, "");
+    const candidates = [
+      clean,
+      clean.startsWith("assets/") ? clean.slice(7) : "assets/" + clean,
+      "assets/data/" + clean.replace(/^.*[\\\/]/, ""),
+      "data/" + clean.replace(/^.*[\\\/]/, "")
+    ];
+    for (const path of candidates) {
+      try {
+        const resp = await fetch(path);
+        if (resp && resp.ok) {
+          if (asText) return await resp.text();
+          return await resp.arrayBuffer();
+        }
+      } catch (_) {}
+    }
+    throw new Error("Static asset not found: " + rawPath);
+  }
+
   async function tauriInvoke(command, args, options) {
     command = String(command || "");
     args = args == null ? {} : args;
@@ -220,7 +241,12 @@
     if (command.startsWith("plugin:window|") || command.startsWith("plugin:image|")) throw new Error("Unsupported mobile command: " + command);
     if (command === "plugin:fs|read_file" || command === "plugin:fs|read_text_file") {
       const spec = fileSpec(args, options);
-      return fileOperation(function () { return readFile(spec); });
+      return fileOperation(function () { return readFile(spec); }).catch(function (nativeErr) {
+        // Fallback: if reading from gp-next sandbox failed, attempt to read bundled game static asset!
+        return fallbackReadStaticAsset(spec.path, false).catch(function () {
+          throw nativeErr;
+        });
+      });
     }
     if (command === "plugin:fs|write_file" || command === "plugin:fs|write_text_file") {
       const spec = fileSpec(args, options);

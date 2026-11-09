@@ -54,7 +54,23 @@ public struct PathSandbox {
       guard !component.isEmpty, component != ".", component != ".." else {
         return nil
       }
-      cursor.appendPathComponent(String(component), isDirectory: false)
+      let direct = cursor.appendingPathComponent(String(component), isDirectory: false)
+      if FileManager.default.fileExists(atPath: direct.path) {
+        cursor = direct
+      } else {
+        // Case-insensitive fallback lookup for Windows binaries running on APFS
+        var matched = false
+        if let contents = try? FileManager.default.contentsOfDirectory(atPath: cursor.path) {
+          let lower = component.lowercased()
+          if let found = contents.first(where: { $0.lowercased() == lower }) {
+            cursor.appendPathComponent(found, isDirectory: false)
+            matched = true
+          }
+        }
+        if !matched {
+          cursor = direct
+        }
+      }
       if (try? cursor.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink)
         == true {
         return nil
