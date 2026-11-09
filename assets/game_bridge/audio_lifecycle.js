@@ -16,10 +16,43 @@
   let waiting = [];
 
   const TARGET_SAMPLE_RATE = 16000;
-  const STREAM_AUDIO_OVER_BYTES = 28 * 1024;
-  const MAX_TOTAL_PCM_BYTES = 75 * 1024 * 1024;
+  const STREAM_AUDIO_OVER_BYTES = 56 * 1024;
+  const MAX_LRU_PCM_BYTES = 34 * 1024 * 1024;
+  const BG_TRIM_LRU_PCM_BYTES = 18 * 1024 * 1024;
+  const MAX_UNCACHED_PCM_BYTES = 45 * 1024 * 1024;
   const MAX_CONCURRENT_AUDIO_DECODES = 4;
-  let totalPcmBytes = 0;
+  let lruPcmBytes = 0;
+  let uncachedPcmBytes = 0;
+  const sfxLruCache = new Map();
+
+  function trimLruCacheTo(targetBytes) {
+    while (lruPcmBytes > targetBytes && sfxLruCache.size > 0) {
+      const oldestKey = sfxLruCache.keys().next().value;
+      const oldest = sfxLruCache.get(oldestKey);
+      lruPcmBytes = Math.max(0, lruPcmBytes - (oldest ? oldest.bytes : 0));
+      sfxLruCache.delete(oldestKey);
+    }
+  }
+
+  function getCachedAudioBuffer(url) {
+    if (!url || !sfxLruCache.has(url)) return null;
+    const entry = sfxLruCache.get(url);
+    sfxLruCache.delete(url);
+    sfxLruCache.set(url, entry);
+    return entry.buffer;
+  }
+
+  function putCachedAudioBuffer(url, buffer, bytes) {
+    if (!url || !buffer || !(bytes > 0)) return;
+    if (sfxLruCache.has(url)) {
+      const old = sfxLruCache.get(url);
+      lruPcmBytes = Math.max(0, lruPcmBytes - old.bytes);
+      sfxLruCache.delete(url);
+    }
+    trimLruCacheTo(Math.max(0, MAX_LRU_PCM_BYTES - bytes));
+    sfxLruCache.set(url, { buffer: buffer, bytes: bytes });
+    lruPcmBytes += bytes;
+  }
 
   function whenActive() {
     return active ? Promise.resolve() : new Promise(resolve => waiting.push(resolve));
@@ -74,6 +107,8 @@
         pausedMedia.add(element);
         nativePause.call(element);
       });
+      // Trim older cached SFX when app goes to background so iOS Jetsam never kills suspended WebView
+      trimLruCacheTo(BG_TRIM_LRU_PCM_BYTES);
       return;
     }
     waiting.splice(0).forEach(resolve => resolve());
@@ -82,6 +117,28 @@
     pausedMedia.forEach(element => nativePlay.call(element).catch(() => {}));
     pausedMedia.clear();
   };
+
+  // --- Deduplicate repetitive mod console.warn / console.error spam to reduce native bridge IPC & disk heat ---
+  if (typeof window.console === "object" && window.console) {
+    const warnCounts = new Map();
+    ["warn", "error"].forEach(function (level) {
+      const origFn = window.console[level];
+      if (typeof origFn !== "function") return;
+      window.console[level] = function () {
+        if (arguments.length > 0 && typeof arguments[0] === "string") {
+          const key = arguments[0].slice(0, 160);
+          const count = (warnCounts.get(key) || 0) + 1;
+          warnCounts.set(key, count);
+          if (warnCounts.size > 200) warnCounts.clear();
+          // Allow the first 2 occurrences, then throttle identical spam to 1 every 200 occurrences
+          if (count > 2 && (count % 200) !== 0) {
+            return;
+          }
+        }
+        return origFn.apply(this, arguments);
+      };
+    });
+  }
 
   // --- Track XHR & fetch audio URLs (including synchronous XHR.response getter!) ---
   if (typeof window.XMLHttpRequest === "function") {
@@ -160,11 +217,11 @@
     return "audio/mpeg";
   }
 
-  // --- Protected 16-stream HTML5 <audio> pool (Looping BGM is NEVER evicted by non-looping SFX!) ---
+  // --- Protected 12-stream HTML5 <audio> pool with URL reuse ---
   const streamPool = [];
-  const MAX_STREAM_ELEMENTS = 16;
+  const MAX_STREAM_ELEMENTS = 12;
   const blobUrlRing = [];
-  const MAX_BLOB_URLS = 8;
+  const MAX_BLOB_URLS = 6;
 
   function registerBlobUrl(url) {
     if (!url) return null;
@@ -179,9 +236,17 @@
   function acquireAudioStream(streamUrl, isLoop, volume) {
     let item = null;
     for (let i = 0; i < streamPool.length; i++) {
-      if ((streamPool[i].paused || streamPool[i].ended) && !streamPool[i].__gardendlessPlayPending) {
+      if ((streamPool[i].paused || streamPool[i].ended) && !streamPool[i].__gardendlessPlayPending && streamPool[i].__gardendlessLoadedUrl === streamUrl) {
         item = streamPool[i];
         break;
+      }
+    }
+    if (!item) {
+      for (let i = 0; i < streamPool.length; i++) {
+        if ((streamPool[i].paused || streamPool[i].ended) && !streamPool[i].__gardendlessPlayPending) {
+          item = streamPool[i];
+          break;
+        }
       }
     }
     if (!item && streamPool.length < MAX_STREAM_ELEMENTS && typeof window.Audio === "function") {
@@ -211,13 +276,17 @@
       clearInterval(item.__gardendlessVolTimer);
       item.__gardendlessVolTimer = null;
     }
-    item.src = streamUrl;
+    if (item.__gardendlessLoadedUrl !== streamUrl) {
+      item.src = streamUrl;
+      item.__gardendlessLoadedUrl = streamUrl;
+    } else {
+      try { item.currentTime = 0; } catch (_) {}
+    }
     item.loop = !!isLoop;
     item.volume = typeof volume === "number" && Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
     return item;
   }
 
-  // --- Track GainNode chain so fade-ins and BGM volume sliders apply to streamed <audio> ---
   const OrigSourceNode = window.AudioBufferSourceNode;
   const OrigAudioNode = window.AudioNode;
 
@@ -284,12 +353,15 @@
           if (audio) {
             self.__gardendlessAudio = audio;
             self.__gardendlessStopRequested = false;
-            audio.addEventListener("loadedmetadata", function onMeta() {
-              audio.removeEventListener("loadedmetadata", onMeta);
-              if (Number.isFinite(audio.duration) && audio.duration > 0) {
-                buf.__gardendlessDuration = audio.duration;
-              }
-            });
+            if (!buf.__gardendlessMetaObserved) {
+              buf.__gardendlessMetaObserved = true;
+              audio.addEventListener("loadedmetadata", function onMeta() {
+                audio.removeEventListener("loadedmetadata", onMeta);
+                if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                  buf.__gardendlessDuration = audio.duration;
+                }
+              });
+            }
             if (typeof offset === "number" && offset > 0) {
               try { audio.currentTime = offset; } catch (_) {}
             }
@@ -308,18 +380,20 @@
             audio.onended = function () {
               if (!self.loop) fireEnded();
             };
-            audio.__gardendlessVolTimer = setInterval(function () {
-              if (audio.paused || audio.ended || self.__gardendlessAudio !== audio) {
-                clearInterval(audio.__gardendlessVolTimer);
-                audio.__gardendlessVolTimer = null;
-                return;
-              }
-              audio.loop = !!self.loop;
-              const currentVol = computeEffectiveVolume(self);
-              if (currentVol > 0.0001) {
-                audio.volume = currentVol;
-              }
-            }, 200);
+            if (self.loop) {
+              audio.__gardendlessVolTimer = setInterval(function () {
+                if (audio.paused || audio.ended || self.__gardendlessAudio !== audio) {
+                  clearInterval(audio.__gardendlessVolTimer);
+                  audio.__gardendlessVolTimer = null;
+                  return;
+                }
+                audio.loop = !!self.loop;
+                const currentVol = computeEffectiveVolume(self);
+                if (currentVol > 0.0001) {
+                  audio.volume = currentVol;
+                }
+              }, 500);
+            }
             audio.__gardendlessPlayPending = true;
             const p = Media.prototype.play.call(audio);
             if (p && typeof p.then === "function") {
@@ -372,7 +446,7 @@
     };
   }
 
-  // --- Intercept decodeAudioData: Offload > 28KB to <audio> (0 PCM RAM!) & 16kHz native decode for <= 28KB SFX (75MB budget) ---
+  // --- Intercept decodeAudioData: Offload > 56KB to <audio> & 34MB URL-keyed LRU cache for <= 56KB SFX ---
   if (typeof Base.prototype.decodeAudioData === "function") {
     const origDecode = Base.prototype.decodeAudioData;
     const decodeQueue = [];
@@ -416,12 +490,13 @@
     function runDecodeJob(job) {
       const self = job.ctx;
       const arrayBuffer = job.arrayBuffer;
+      const directUrl = job.directUrl;
       const successCallback = job.successCallback;
       const errorCallback = job.errorCallback;
       const resolve = job.resolve;
       const reject = job.reject;
 
-      if (totalPcmBytes >= MAX_TOTAL_PCM_BYTES) {
+      if (!directUrl && uncachedPcmBytes >= MAX_UNCACHED_PCM_BYTES) {
         activeDecodes--;
         pumpDecodeQueue();
         const silent = createPlaceholderBuffer(self, null, null, null, 0);
@@ -438,7 +513,12 @@
         settled = true;
         activeDecodes--;
         if (decodedBuffer && typeof decodedBuffer.length === "number") {
-          totalPcmBytes += decodedBuffer.length * (decodedBuffer.numberOfChannels || 1) * 4;
+          const bytes = decodedBuffer.length * (decodedBuffer.numberOfChannels || 1) * 4;
+          if (directUrl) {
+            putCachedAudioBuffer(directUrl, decodedBuffer, bytes);
+          } else {
+            uncachedPcmBytes += bytes;
+          }
         }
         pumpDecodeQueue();
         if (typeof successCallback === "function") {
@@ -474,10 +554,9 @@
         return origDecode.apply(self, arguments);
       }
       const byteLen = arrayBuffer && typeof arrayBuffer.byteLength === "number" ? arrayBuffer.byteLength : 0;
+      const directUrl = (arrayBuffer && arrayBuffer.__gardendlessAudioUrl) || null;
 
-      // Offload all BGM, jingles, and tracks > 28KB to WebKit <audio> streaming (0 PCM RAM!)
       if (byteLen > STREAM_AUDIO_OVER_BYTES) {
-        const directUrl = arrayBuffer.__gardendlessAudioUrl || null;
         const mime = sniffAudioMime(arrayBuffer);
         let blobBytes = null;
         if (!directUrl) {
@@ -494,10 +573,23 @@
         return Promise.resolve(placeholder);
       }
 
+      if (directUrl) {
+        const cached = getCachedAudioBuffer(directUrl);
+        if (cached) {
+          if (typeof successCallback === "function") {
+            setTimeout(function () {
+              try { successCallback(cached); } catch (_) {}
+            }, 0);
+          }
+          return Promise.resolve(cached);
+        }
+      }
+
       return new Promise(function (resolve, reject) {
         decodeQueue.push({
           ctx: self,
           arrayBuffer: arrayBuffer,
+          directUrl: directUrl,
           successCallback: successCallback,
           errorCallback: errorCallback,
           resolve: resolve,
@@ -508,7 +600,7 @@
     };
   }
 
-  // --- CRITICAL TEXTURE MEMORY OPTIMIZER ---
+  // --- CRITICAL TEXTURE & VRAM OPTIMIZER ---
   if (typeof window.createImageBitmap === "function") {
     const origCreateImageBitmap = window.createImageBitmap;
     const bitmapQueue = [];
@@ -613,6 +705,9 @@
   if (typeof window.addEventListener === "function") {
     const cleanupOnReload = function () {
       try {
+        sfxLruCache.clear();
+        lruPcmBytes = 0;
+        uncachedPcmBytes = 0;
         streamPool.forEach(function (a) {
           try {
             nativePause.call(a);

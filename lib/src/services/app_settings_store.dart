@@ -54,6 +54,7 @@ class AppSettings {
     this.watermarkEnabled = true,
     this.quickLaunchEnabled = false,
     this.renderResolution = RenderResolution.full,
+    this.customRenderPercent,
     this.screenFit = ScreenFit.balanced,
     this.detailedAudioDiagnosticsEnabled = false,
     this.themePreference = ThemePreference.system,
@@ -70,6 +71,7 @@ class AppSettings {
       watermarkEnabled: json['watermarkEnabled'] as bool? ?? true,
       quickLaunchEnabled: json['quickLaunchEnabled'] as bool? ?? false,
       renderResolution: RenderResolution.fromName(json['renderResolution']),
+      customRenderPercent: json['customRenderPercent'] is int ? (json['customRenderPercent'] as int).clamp(1, 100) : null,
       screenFit: ScreenFit.fromName(json['screenFit']),
       detailedAudioDiagnosticsEnabled:
           json['detailedAudioDiagnosticsEnabled'] as bool? ?? false,
@@ -90,6 +92,7 @@ class AppSettings {
   /// Opens the game directly on a cold start instead of the launcher.
   final bool quickLaunchEnabled;
   final RenderResolution renderResolution;
+  final int? customRenderPercent;
   final ScreenFit screenFit;
   final bool detailedAudioDiagnosticsEnabled;
   final ThemePreference themePreference;
@@ -114,6 +117,8 @@ class AppSettings {
     bool? watermarkEnabled,
     bool? quickLaunchEnabled,
     RenderResolution? renderResolution,
+    int? customRenderPercent,
+    bool clearCustomRenderPercent = false,
     ScreenFit? screenFit,
     bool? detailedAudioDiagnosticsEnabled,
     ThemePreference? themePreference,
@@ -128,6 +133,7 @@ class AppSettings {
       watermarkEnabled: watermarkEnabled ?? this.watermarkEnabled,
       quickLaunchEnabled: quickLaunchEnabled ?? this.quickLaunchEnabled,
       renderResolution: renderResolution ?? this.renderResolution,
+      customRenderPercent: clearCustomRenderPercent ? null : (customRenderPercent ?? this.customRenderPercent),
       screenFit: screenFit ?? this.screenFit,
       detailedAudioDiagnosticsEnabled: detailedAudioDiagnosticsEnabled ??
           this.detailedAudioDiagnosticsEnabled,
@@ -146,6 +152,7 @@ class AppSettings {
         'watermarkEnabled': watermarkEnabled,
         'quickLaunchEnabled': quickLaunchEnabled,
         'renderResolution': renderResolution.name,
+        if (customRenderPercent != null) 'customRenderPercent': customRenderPercent,
         'screenFit': screenFit.name,
         'detailedAudioDiagnosticsEnabled': detailedAudioDiagnosticsEnabled,
         'themePreference': themePreference.name,

@@ -153,6 +153,8 @@ class AppController extends ChangeNotifier {
   bool get watermarkEnabled => _appSettings.watermarkEnabled;
   bool get quickLaunchEnabled => _appSettings.quickLaunchEnabled;
   RenderResolution get renderResolution => _appSettings.renderResolution;
+
+  int get renderResolutionPercent => _appSettings.customRenderPercent ?? (switch (_appSettings.renderResolution) { RenderResolution.full => 100, RenderResolution.medium => 75, RenderResolution.low => 50 });
   ScreenFit get screenFit => _appSettings.screenFit;
   bool get detailedAudioDiagnosticsEnabled =>
       _appSettings.detailedAudioDiagnosticsEnabled;
@@ -975,7 +977,7 @@ class AppController extends ChangeNotifier {
       watermarkEnabled: watermarkEnabled,
       autoCollectSunEnabled: _manifest.autoCollectSunEnabled,
       detailedAudioDiagnosticsEnabled: detailedAudioDiagnosticsEnabled,
-      renderScale: renderResolution.scale,
+      renderScale: _appSettings.customRenderPercent != null ? (_appSettings.customRenderPercent! / 100.0) : renderResolution.scale,
       screenFit: screenFit,
       touchDiagnosticsEnabled: toolShedUnlocked && touchDiagnosticsEnabled,
       gestureHint: _appSettings.gestureHintShown
@@ -1125,7 +1127,16 @@ class AppController extends ChangeNotifier {
 
   Future<void> setRenderResolution(RenderResolution resolution) {
     return _updateAppSettings(
-      _appSettings.copyWith(renderResolution: resolution),
+      _appSettings.copyWith(
+        renderResolution: resolution,
+        clearCustomRenderPercent: true,
+      ),
+    );
+  }
+
+  Future<void> setCustomRenderPercent(int percent) {
+    return _updateAppSettings(
+      _appSettings.copyWith(customRenderPercent: percent.clamp(1, 100)),
     );
   }
 
