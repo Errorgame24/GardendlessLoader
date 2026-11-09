@@ -173,7 +173,8 @@
   function isNativeTouchTarget(target) {
     let current = target;
     while (current && current !== document) {
-      if (current.id === "gp-overlay" || current.id === "ge-toast-wrap") {
+      if (current.id === "gp-overlay" || current.id === "ge-toast-wrap" ||
+          current.id === "gardendless-native-watermark" || current.id === "gardendless-lain-scale-panel") {
         return true;
       }
       const className = typeof current.className === "string"

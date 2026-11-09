@@ -404,6 +404,14 @@
 
   // Tauri v2 marks its runtime with isTauri; GP-Next installs window.electron, the game's quit path, only when it is set.
   window.isTauri = true;
+  window.electronAPI = window.electronAPI || {
+    openKeybindWindow: function () {
+      console.log("[Mobile] Keybind window is not supported on touch devices.");
+    },
+    closeWindow: function () {
+      return invoke("host:returnHome");
+    }
+  };
   window.__TAURI_INTERNALS__ = {invoke: tauriInvoke, callbacks: callbacks,
     transformCallback: function (callback, once) {
       const id = callbackId++;

@@ -188,27 +188,29 @@
       node.textContent = "present day, present time";
       Object.assign(node.style, {
         position: "fixed",
-        right: "12px",
-        bottom: "10px",
-        zIndex: "2147483646",
+        right: "10px",
+        bottom: "8px",
+        zIndex: "2147483647",
         pointerEvents: "auto",
         cursor: "pointer",
         userSelect: "none",
-        color: "rgba(255,255,255,.52)",
+        color: "rgba(255,255,255,.7)",
         font: "600 12px -apple-system,BlinkMacSystemFont,monospace,sans-serif",
         letterSpacing: "0.3px",
-        textShadow: "0 1px 2px rgba(0,0,0,.75)",
-        padding: "2px 4px"
+        textShadow: "0 1px 3px rgba(0,0,0,.9)",
+        padding: "8px 12px",
+        touchAction: "manipulation",
+        webkitTapHighlightColor: "transparent"
       });
-      node.addEventListener("click", function (e) {
-        e.stopPropagation();
+      function onWatermarkTap(e) {
+        if (e) {
+          e.stopPropagation();
+          if (typeof e.preventDefault === "function" && e.cancelable) e.preventDefault();
+        }
         togglePanel();
-      });
-      node.addEventListener("touchend", function (e) {
-        e.stopPropagation();
-        e.preventDefault();
-        togglePanel();
-      }, { passive: false });
+      }
+      node.addEventListener("click", onWatermarkTap);
+      node.addEventListener("touchend", onWatermarkTap, { passive: false });
       (document.body || document.documentElement).appendChild(node);
     }
     const enabled = window.__gardendlessHost &&
