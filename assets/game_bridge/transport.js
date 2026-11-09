@@ -282,9 +282,12 @@
     if (command === "plugin:fs|read_file" || command === "plugin:fs|read_text_file") {
       const isText = command === "plugin:fs|read_text_file";
       const spec = fileSpec(args, options);
-      const isResource = (args && args.options && args.options.baseDir === 13) ||
-                         (options && options.baseDir === 13) ||
-                         (spec.options && spec.options.baseDir === 13);
+      const baseDir = (args && args.options && args.options.baseDir) ||
+                      (options && options.baseDir) ||
+                      (spec.options && spec.options.baseDir);
+      const isResource = baseDir === 13;
+      const rawPath = typeof spec.path === "string" ? spec.path : "";
+      const isAppData = baseDir === 14 || rawPath.startsWith("gp-next/");
       if (isResource) {
         return fallbackReadStaticAsset(spec.path, isText);
       }
@@ -293,6 +296,7 @@
           return isText ? wrapArrayBufferString(buf) : buf;
         })
         .catch(function (nativeErr) {
+          if (isAppData) throw nativeErr;
           return fallbackReadStaticAsset(spec.path, isText).catch(function () {
             throw nativeErr;
           });
@@ -303,8 +307,10 @@
       return fileOperation(function () { return writeFile(args, spec); });
     }
     if (command === "plugin:fs|exists") {
-      const isResource = (args && args.options && args.options.baseDir === 13) ||
-                         (options && options.baseDir === 13);
+      const baseDir = (args && args.options && args.options.baseDir) || (options && options.baseDir);
+      const isResource = baseDir === 13;
+      const rawPath = typeof args.path === "string" ? args.path : "";
+      const isAppData = baseDir === 14 || rawPath.startsWith("gp-next/");
       if (isResource) {
         return fallbackReadStaticAsset(args.path, false).then(function () {
           return true;
@@ -317,12 +323,14 @@
       }
       return invoke(command, {namespace: "gp-next", args: args, options: options}).then(function (res) {
         if (res === true) return true;
+        if (isAppData) return false;
         return fallbackReadStaticAsset(args.path, false).then(function () {
           return true;
         }).catch(function () {
           return false;
         });
       }).catch(function () {
+        if (isAppData) return false;
         return fallbackReadStaticAsset(args.path, false).then(function () {
           return true;
         }).catch(function () {
@@ -331,8 +339,10 @@
       });
     }
     if (command === "plugin:fs|stat" || command === "plugin:fs|lstat") {
-      const isResource = (args && args.options && args.options.baseDir === 13) ||
-                         (options && options.baseDir === 13);
+      const baseDir = (args && args.options && args.options.baseDir) || (options && options.baseDir);
+      const isResource = baseDir === 13;
+      const rawPath = typeof args.path === "string" ? args.path : "";
+      const isAppData = baseDir === 14 || rawPath.startsWith("gp-next/");
       if (isResource) {
         return fallbackReadStaticAsset(args.path, false).then(function (buf) {
           const size = buf.byteLength || 0;
@@ -351,6 +361,7 @@
         });
       }
       return invoke(command, {namespace: "gp-next", args: args, options: options}).catch(function (nativeErr) {
+        if (isAppData) throw nativeErr;
         return fallbackReadStaticAsset(args.path, false).then(function (buf) {
           const size = buf.byteLength || 0;
           return {

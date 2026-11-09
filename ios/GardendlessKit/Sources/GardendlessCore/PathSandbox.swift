@@ -52,7 +52,22 @@ public struct PathSandbox {
       return direct
     }
 
-    // Second attempt: check common subdirectories and extensions
+    if relativePath.hasPrefix("gp-next/") {
+      if relativePath == "gp-next/settings.json" {
+        return resolveUnder(root: root, relativePath: "src/settings.json")
+      }
+      if relativePath == "gp-next/import-map.json" {
+        return resolveUnder(root: root, relativePath: "src/import-map.json")
+      }
+      let stripped = String(relativePath.dropFirst(8))
+      if let found = resolveUnder(root: root, relativePath: stripped)
+        ?? resolveUnder(root: root, relativePath: "assets/\(stripped)") {
+        return found
+      }
+      return nil
+    }
+
+    // Fallbacks for game assets
     let base = (relativePath as NSString).lastPathComponent
     var fallbacks = [
       "assets/\(relativePath)",
@@ -60,12 +75,8 @@ public struct PathSandbox {
       "assets/data/\(relativePath)",
       "data/\(base)",
       "assets/data/\(base)",
-      "resources/data/\(base)",
-      "assets/resources/data/\(base)",
-      relativePath.hasPrefix("gp-next/") ? String(relativePath.dropFirst(8)) : nil,
-      relativePath.hasPrefix("gp-next/") ? "assets/\(String(relativePath.dropFirst(8)))" : nil,
-      relativePath == "settings.json" || relativePath == "gp-next/settings.json" ? "src/settings.json" : nil,
-      relativePath == "import-map.json" || relativePath == "gp-next/import-map.json" ? "src/import-map.json" : nil,
+      relativePath == "settings.json" ? "src/settings.json" : nil,
+      relativePath == "import-map.json" ? "src/import-map.json" : nil,
     ].compactMap { $0 }
 
     if !relativePath.hasSuffix(".json") {
@@ -75,8 +86,6 @@ public struct PathSandbox {
       fallbacks.append("assets/\(relativePath).json")
       fallbacks.append("data/\(base).json")
       fallbacks.append("assets/data/\(base).json")
-      fallbacks.append("resources/data/\(base).json")
-      fallbacks.append("assets/resources/data/\(base).json")
     }
 
     for candidate in fallbacks {
