@@ -46,6 +46,32 @@ public struct PathSandbox {
   public func resolve(_ relativePath: String) -> URL? {
     guard !relativePath.isEmpty, !relativePath.hasPrefix("/"),
           !Self.isPackageMetadataPath(relativePath) else { return nil }
+
+    // First attempt: direct resolution under root
+    if let direct = resolveUnder(root: root, relativePath: relativePath) {
+      return direct
+    }
+
+    // Second attempt: if relativePath requests `gp-next/xxx` or `settings.json`,
+    // and was not found under root, check if it lives under `assets/`, `assets/gp-next/`, `src/`, etc.
+    let fallbacks = [
+      "assets/\(relativePath)",
+      relativePath.hasPrefix("gp-next/") ? String(relativePath.dropFirst(8)) : nil,
+      relativePath.hasPrefix("gp-next/") ? "assets/\(String(relativePath.dropFirst(8)))" : nil,
+      relativePath == "settings.json" || relativePath == "gp-next/settings.json" ? "src/settings.json" : nil,
+      relativePath == "import-map.json" || relativePath == "gp-next/import-map.json" ? "src/import-map.json" : nil,
+    ].compactMap { $0 }
+
+    for candidate in fallbacks {
+      if let found = resolveUnder(root: root, relativePath: candidate) {
+        return found
+      }
+    }
+
+    return nil
+  }
+
+  private func resolveUnder(root: URL, relativePath: String) -> URL? {
     var cursor = root
     for component in relativePath.split(
       separator: "/",
@@ -58,7 +84,6 @@ public struct PathSandbox {
       if FileManager.default.fileExists(atPath: direct.path) {
         cursor = direct
       } else {
-        // Case-insensitive fallback lookup for Windows binaries running on APFS
         var matched = false
         if let contents = try? FileManager.default.contentsOfDirectory(atPath: cursor.path) {
           let lower = component.lowercased()

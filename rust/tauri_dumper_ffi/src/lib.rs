@@ -32,10 +32,10 @@ fn extract_tauri_exe_impl(exe_path: &Path, output_dir: &Path) -> Result<i32, i32
     // Clean up tauri-dumper's diagnostic manifest so only game web assets remain.
     let _ = fs::remove_file(output_dir.join("tauri-dumper.manifest.json"));
 
-    // Normalize nested single-directory output if `index.html` was embedded under a prefix.
+    // Normalize nested directory output so docs root (index.html, src/, assets/) is at output_dir root.
     normalize_extracted_root(output_dir);
 
-    // Flatten any nested subdirectories (e.g. data/, assets/data/) so case variations match.
+    // Create case-insensitive aliases for all files to support APFS.
     create_case_insensitive_aliases(output_dir);
 
     if !output_dir.join("index.html").is_file() {
@@ -69,44 +69,80 @@ fn create_case_insensitive_aliases(dir: &Path) {
 }
 
 fn normalize_extracted_root(output_dir: &Path) {
-    if output_dir.join("index.html").is_file() {
-        return;
-    }
-    let Some(nested_root) = find_nested_index_root(output_dir, 3) else {
+    let Some(docs_root) = find_best_docs_root(output_dir) else {
         return;
     };
-    if nested_root == output_dir {
+    if docs_root == output_dir {
         return;
     }
-    let Ok(entries) = fs::read_dir(&nested_root) else {
+    move_children_merge(&docs_root, output_dir);
+}
+
+fn move_children_merge(from_dir: &Path, to_dir: &Path) {
+    let Ok(entries) = fs::read_dir(from_dir) else {
         return;
     };
     for entry in entries.flatten() {
         let from = entry.path();
-        let to = output_dir.join(entry.file_name());
-        if !to.exists() {
+        let to = to_dir.join(entry.file_name());
+        if from.is_dir() {
+            if to.is_dir() {
+                move_children_merge(&from, &to);
+                let _ = fs::remove_dir(&from);
+            } else if !to.exists() {
+                let _ = fs::rename(&from, &to);
+            }
+        } else if !to.exists() {
             let _ = fs::rename(&from, &to);
         }
     }
 }
 
-fn find_nested_index_root(dir: &Path, max_depth: usize) -> Option<PathBuf> {
-    if dir.join("index.html").is_file() {
-        return Some(dir.to_path_buf());
+fn find_best_docs_root(root: &Path) -> Option<PathBuf> {
+    fn is_complete_docs(dir: &Path) -> bool {
+        dir.join("index.html").is_file()
+            && dir.join("src").join("settings.json").is_file()
+            && dir.join("src").join("import-map.json").is_file()
+            && dir.join("assets").is_dir()
+            && dir.join("cocos-js").is_dir()
     }
-    if max_depth == 0 {
-        return None;
+
+    if is_complete_docs(root) {
+        return Some(root.to_path_buf());
     }
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_nested_index_root(&path, max_depth - 1) {
-                return Some(found);
+
+    let mut queue = vec![(root.to_path_buf(), 0)];
+    let mut candidates = Vec::new();
+
+    while let Some((dir, depth)) = queue.pop() {
+        if depth > 4 {
+            continue;
+        }
+        if is_complete_docs(&dir) {
+            candidates.push(dir);
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    queue.push((p, depth + 1));
+                }
             }
         }
     }
-    None
+
+    candidates.sort_by(|a, b| {
+        let a_is_docs = a.file_name().and_then(|n| n.to_str()) == Some("docs");
+        let b_is_docs = b.file_name().and_then(|n| n.to_str()) == Some("docs");
+        if a_is_docs != b_is_docs {
+            b_is_docs.cmp(&a_is_docs)
+        } else {
+            a.components().count().cmp(&b.components().count())
+        }
+    });
+
+    candidates.into_iter().next()
 }
 
 /// C-ABI entry point for iOS (`AppDelegate.swift` via `Runner-Bridging-Header.h`)

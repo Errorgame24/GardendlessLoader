@@ -22,7 +22,8 @@ public final class GpNextPathResolver {
       throw GameError.failed(.gpNextForbidden, "GP-Next 文件路径为空")
     }
     if let base = options["baseDir"] as? Int,
-       base != GpNextConstants.appDataBaseDirectoryID {
+       base != GpNextConstants.appDataBaseDirectoryID,
+       base != 13 /* Resource dir */ {
       throw GameError.failed(.gpNextForbidden, "不允许访问 Tauri baseDir \(base)")
     }
     if raw.hasPrefix("file:") {
@@ -36,14 +37,15 @@ public final class GpNextPathResolver {
         "GP-Next 路径超出 Loader 沙箱"
       )
     }
-    guard let namespaceIndex = components.firstIndex(of: "gp-next"),
-          raw.hasPrefix("/") || namespaceIndex == components.startIndex else {
-      throw GameError.failed(
-        .gpNextForbidden,
-        "GP-Next 路径超出 Loader 沙箱"
-      )
+
+    let subComponents: [String]
+    if let namespaceIndex = components.firstIndex(of: "gp-next") {
+      subComponents = Array(components[components.index(after: namespaceIndex)...])
+    } else {
+      subComponents = components
     }
-    let candidate = components[components.index(after: namespaceIndex)...]
+
+    let candidate = subComponents
       .reduce(gpNextRoot) { result, component in
         result.appendingPathComponent(component)
       }

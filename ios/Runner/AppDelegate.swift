@@ -679,6 +679,22 @@ import UIKit
       ),
       force: true
     )
+
+    // Ensure gp-next support files exist in slot
+    let targetDirURL = URL(fileURLWithPath: targetDirectory, isDirectory: true)
+    let gpNextDirURL = targetDirURL.appendingPathComponent("gp-next", isDirectory: true)
+    try? FileManager.default.createDirectory(at: gpNextDirURL, withIntermediateDirectories: true)
+    let settingsSrc = targetDirURL.appendingPathComponent("src/settings.json")
+    let settingsDst = gpNextDirURL.appendingPathComponent("settings.json")
+    if !FileManager.default.fileExists(atPath: settingsDst.path),
+       FileManager.default.fileExists(atPath: settingsSrc.path) {
+      try? FileManager.default.copyItem(at: settingsSrc, to: settingsDst)
+    }
+    let directSettingsDst = targetDirURL.appendingPathComponent("settings.json")
+    if !FileManager.default.fileExists(atPath: directSettingsDst.path),
+       FileManager.default.fileExists(atPath: settingsSrc.path) {
+      try? FileManager.default.copyItem(at: settingsSrc, to: directSettingsDst)
+    }
   }
 
   /// Flutter error code naming the failure cause; it selects the launcher's fix hint.
