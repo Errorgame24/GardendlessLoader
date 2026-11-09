@@ -297,6 +297,17 @@
     if (command === "plugin:os|type") return "Darwin";
     if (command === "plugin:os|arch") return "arm64";
     if (command === "plugin:os|version") return "1.0.0";
+    if (command === "gp_next_install_pack" || command === "gp_next_uninstall_pack" ||
+        command === "gp_next_reload_packs" || command === "gp_next_enable_pack" ||
+        command === "gp_next_disable_pack") {
+      return null;
+    }
+    if (command === "gp_next_list_packs" || command === "gp_next_get_packs") {
+      return [];
+    }
+    if (command.startsWith("gp_next_")) {
+      return null;
+    }
     if (command === "plugin:fs|read_file" || command === "plugin:fs|read_text_file") {
       const isText = command === "plugin:fs|read_text_file";
       const spec = fileSpec(args, options);

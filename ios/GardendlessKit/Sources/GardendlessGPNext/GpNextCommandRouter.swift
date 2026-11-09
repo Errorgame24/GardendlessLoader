@@ -122,7 +122,16 @@ public final class GpNextCommandRouter {
       return .openURL(url)
     case "plugin:opener|open_path":
       return .importPackages
+    case "gp_next_install_pack":
+      return .value(NSNull())
+    case "gp_next_list_packs", "gp_next_get_packs":
+      return .value([])
+    case "gp_next_uninstall_pack", "gp_next_reload_packs", "gp_next_enable_pack", "gp_next_disable_pack":
+      return .value(NSNull())
     default:
+      if command.hasPrefix("gp_next_") {
+        return .value(NSNull())
+      }
       throw GameError.failed(.gpNextUnavailable, "未兼容的 GP-Next 命令：\(command)")
     }
   }
