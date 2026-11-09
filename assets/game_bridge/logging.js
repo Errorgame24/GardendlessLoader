@@ -8,7 +8,7 @@
   let emittedInWindow = 0;
 
   function text(value) {
-    if (value instanceof Error) return value.message || String(value);
+    if (value instanceof Error) return (value.message || String(value)) + (value.stack ? ("\n" + value.stack) : "");
     if (typeof value === "string") return value;
     try { return JSON.stringify(value); } catch (_) { return String(value); }
   }
@@ -20,10 +20,10 @@
       emittedInWindow = 0;
       recent.clear();
     }
-    if (emittedInWindow >= 60) return;
+    if (emittedInWindow >= 300) return;
     const fingerprint = event + "|" + message + "|" + String(details && details.line || 0);
     const previous = recent.get(fingerprint) || 0;
-    if (now - previous < 10000) return;
+    if (now - previous < 1000) return;
     recent.set(fingerprint, now);
     emittedInWindow += 1;
     const host = window.__gardendlessHost;
@@ -42,12 +42,18 @@
   }
 
   window.addEventListener("error", function (event) {
+    const target = event.target;
+    if (target && target.tagName && target !== window) {
+      const src = target.src || target.href || "";
+      emit("javascript_uncaught_error", "ERROR", "Resource failed to load: <" + target.tagName + "> " + src, {});
+      return;
+    }
     emit("javascript_uncaught_error", "ERROR", event.message, {
       stack: event.error && event.error.stack,
       line: event.lineno,
       column: event.colno
     });
-  });
+  }, true);
 
   window.addEventListener("unhandledrejection", function (event) {
     const reason = event.reason;
@@ -56,13 +62,13 @@
     });
   });
 
-  ["warn", "error"].forEach(function (name) {
+  ["warn", "error", "log", "info"].forEach(function (name) {
     const original = console[name];
     console[name] = function () {
       const values = Array.prototype.slice.call(arguments);
       try {
-        emit("javascript_console", name === "error" ? "ERROR" : "WARN",
-          values.map(text).join(" "), {});
+        const level = name === "error" ? "ERROR" : (name === "warn" ? "WARN" : "INFO");
+        emit("javascript_console", level, values.map(text).join(" "), {});
       } catch (_) {}
       return original.apply(console, values);
     };

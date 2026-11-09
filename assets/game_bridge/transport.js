@@ -278,7 +278,25 @@
     // The game's quit button closes the Tauri window; on mobile that means returning to the launcher.
     if (command === "plugin:window|close") return invoke("host:returnHome");
     if (disabled.has(command)) return null;
-    if (command.startsWith("plugin:window|") || command.startsWith("plugin:image|")) throw new Error("Unsupported mobile command: " + command);
+    if (command === "plugin:window|scale_factor") return window.devicePixelRatio || 1;
+    if (command === "plugin:window|inner_size" || command === "plugin:window|outer_size") {
+      return { width: window.innerWidth || 1280, height: window.innerHeight || 720 };
+    }
+    if (command === "plugin:window|inner_position" || command === "plugin:window|outer_position") {
+      return { x: 0, y: 0 };
+    }
+    if (command === "plugin:window|is_visible" || command === "plugin:window|is_focused" ||
+        command === "plugin:window|is_enabled" || command === "plugin:window|is_decorated") return true;
+    if (command === "plugin:window|is_minimized") return false;
+    if (command === "plugin:window|theme") return "dark";
+    if (command.startsWith("plugin:window|")) return null;
+    if (command.startsWith("plugin:image|")) return null;
+    if (command.startsWith("plugin:clipboard|")) return null;
+    if (command.startsWith("plugin:notification|")) return null;
+    if (command === "plugin:os|platform") return "ios";
+    if (command === "plugin:os|type") return "Darwin";
+    if (command === "plugin:os|arch") return "arm64";
+    if (command === "plugin:os|version") return "1.0.0";
     if (command === "plugin:fs|read_file" || command === "plugin:fs|read_text_file") {
       const isText = command === "plugin:fs|read_text_file";
       const spec = fileSpec(args, options);

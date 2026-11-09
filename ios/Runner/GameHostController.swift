@@ -179,6 +179,9 @@ final class GameHostController: UIViewController,
     configuration.userContentController = contentController
 
     webView = WKWebView(frame: .zero, configuration: configuration)
+    if #available(iOS 16.4, *) {
+      webView.isInspectable = true
+    }
     webView.isOpaque = true
     webView.backgroundColor = .black
     webView.scrollView.backgroundColor = .black
