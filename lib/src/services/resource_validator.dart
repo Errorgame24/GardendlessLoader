@@ -166,8 +166,6 @@ class ResourceValidator {
       totalBytes += sizeBytes;
       if (indexed) {
         payload[relative] = (file: file, sizeBytes: sizeBytes);
-      } else {
-        file.openSync(mode: FileMode.read).closeSync();
       }
     }
     final stats = ResourceStats(fileCount: fileCount, totalBytes: totalBytes);

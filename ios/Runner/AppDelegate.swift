@@ -47,13 +47,8 @@ import UIKit
       application,
       didFinishLaunchingWithOptions: launchOptions
     )
+    Self.migrateAndCleanupSiblingContainers()
     logStore.initialize()
-    DispatchQueue.global(qos: .utility).async {
-      if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-        let loaderDir = docs.appendingPathComponent("GardendlessLoader")
-        Self.excludeFromBackupRecursively(url: loaderDir)
-      }
-    }
     return launched
   }
 
@@ -491,39 +486,87 @@ import UIKit
         )
         return
       }
-      // Allow picking only standard .zip archives and Windows Tauri .exe binaries.
-      // Crucial: do NOT include UTType.data or UTType.item, as those force iOS Files app
-      // to crawl and index all 8,900+ extracted game assets inside Documents, freezing CPU.
-      let exeType = UTType("com.microsoft.windows-executable")
-        ?? UTType(filenameExtension: "exe")
-        ?? UTType(tag: "exe", tagClass: .filenameExtension, conformingTo: .data)
-      var contentTypes: [UTType] = [UTType.zip]
-      if let exeType {
-        contentTypes.append(exeType)
-      }
-      let picker = UIDocumentPickerViewController(
-        forOpeningContentTypes: contentTypes,
-        asCopy: false
-      )
-      picker.delegate = self
-      picker.allowsMultipleSelection = false
-      picker.modalPresentationStyle = .formSheet
-      if #available(iOS 14.0, *) {
-        if let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
-          picker.directoryURL = downloads
-        }
-      }
       self.zipImportInProgress = true
       self.pendingImportResult = result
       self.pendingImportTargetDirectory = targetDirectory
-      rootController.present(picker, animated: true)
+
+      let localCandidates = Self.discoverLocalPackageFiles()
+      if !localCandidates.isEmpty {
+        let sheet = UIAlertController(
+          title: "发现本地游戏资源包",
+          message: "检测到共享目录中已有安装包，可直接极速导入（无需打开系统文件选择器）：",
+          preferredStyle: .alert
+        )
+        for fileURL in localCandidates.prefix(3) {
+          sheet.addAction(
+            UIAlertAction(title: "直接导入：\(fileURL.lastPathComponent)", style: .default) { [weak self] _ in
+              guard let self else { return }
+              let cb = self.pendingImportResult
+              let dir = self.pendingImportTargetDirectory
+              self.pendingImportResult = nil
+              self.pendingImportTargetDirectory = nil
+              guard let cb, let dir else {
+                self.zipImportInProgress = false
+                return
+              }
+              self.finishPickedZipImport(zipURL: fileURL, targetDirectory: dir, result: cb, isTempCopy: false)
+            }
+          )
+        }
+        sheet.addAction(
+          UIAlertAction(title: "打开系统文件选择器…", style: .default) { [weak self] _ in
+            self?.presentSystemDocumentPicker(from: rootController)
+          }
+        )
+        sheet.addAction(
+          UIAlertAction(title: "取消", style: .cancel) { [weak self] _ in
+            guard let self else { return }
+            let cb = self.pendingImportResult
+            self.pendingImportResult = nil
+            self.pendingImportTargetDirectory = nil
+            self.zipImportInProgress = false
+            cb?(nil)
+          }
+        )
+        rootController.present(sheet, animated: true)
+      } else {
+        self.presentSystemDocumentPicker(from: rootController)
+      }
     }
+  }
+
+  private func presentSystemDocumentPicker(from rootController: UIViewController) {
+    // Include UTType.item and UTType.data alongside .zip and .exe so iOS and LiveContainer
+    // always allow selecting both .exe and .zip packages from any file provider.
+    var contentTypes: [UTType] = [
+      UTType.item,
+      UTType.data,
+      UTType.content,
+      UTType.zip,
+      UTType.archive,
+    ]
+    if let exeExt = UTType(filenameExtension: "exe") {
+      contentTypes.append(exeExt)
+    }
+    if let exeWin = UTType("com.microsoft.windows-executable") {
+      contentTypes.append(exeWin)
+    }
+    let picker = UIDocumentPickerViewController(
+      forOpeningContentTypes: contentTypes,
+      asCopy: true
+    )
+    picker.delegate = self
+    picker.allowsMultipleSelection = false
+    // Present fullScreen so UIKit pauses Flutter Metal rendering and backdrop blur underneath.
+    picker.modalPresentationStyle = .fullScreen
+    rootController.present(picker, animated: true)
   }
 
   private func finishPickedZipImport(
     zipURL: URL,
     targetDirectory: String,
-    result: @escaping FlutterResult
+    result: @escaping FlutterResult,
+    isTempCopy: Bool = true
   ) {
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       guard let self else {
@@ -542,6 +585,9 @@ import UIKit
       defer {
         if didAccess {
           zipURL.stopAccessingSecurityScopedResource()
+        }
+        if isTempCopy && (zipURL.path.contains("/tmp/") || zipURL.path.hasPrefix(FileManager.default.temporaryDirectory.path)) {
+          try? FileManager.default.removeItem(at: zipURL)
         }
       }
       do {
@@ -563,7 +609,7 @@ import UIKit
           }
         }
         let targetURL = URL(fileURLWithPath: targetDirectory, isDirectory: true)
-        Self.excludeFromBackupRecursively(url: targetURL)
+        Self.excludeFromBackupTopLevel(url: targetURL)
         DispatchQueue.main.async {
           self.zipImportInProgress = false
           result(targetDirectory)
@@ -583,23 +629,134 @@ import UIKit
     }
   }
 
-  /// Excludes large extracted asset directories from iCloud backup and fileprovider indexing
-  static func excludeFromBackupRecursively(url: URL) {
-    var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
-    var rootURL = url
+  /// Sets isExcludedFromBackup on a top-level directory in O(1) without enumerating thousands of child files.
+  static func excludeFromBackupTopLevel(url: URL) {
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+    var target = url
     var rv = URLResourceValues()
     rv.isExcludedFromBackup = true
-    try? rootURL.setResourceValues(rv)
-    if isDir.boolValue {
-      if let enumerator = FileManager.default.enumerator(
-        at: url,
-        includingPropertiesForKeys: [.isDirectoryKey],
+    try? target.setResourceValues(rv)
+  }
+
+  /// Discovers .exe or .zip packages placed in the app Documents/Inbox or parent LiveContainer Documents folder.
+  static func discoverLocalPackageFiles() -> [URL] {
+    let fm = FileManager.default
+    guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return [] }
+    var searchDirs: [URL] = [
+      docs,
+      docs.appendingPathComponent("Inbox", isDirectory: true),
+    ]
+    // Check LiveContainer top-level Documents directory (../../../ from guest Documents)
+    let parentAppDir = docs.deletingLastPathComponent().deletingLastPathComponent()
+    if parentAppDir.lastPathComponent == "Application" {
+      let hostDocs = parentAppDir.deletingLastPathComponent().deletingLastPathComponent()
+      searchDirs.append(hostDocs)
+      searchDirs.append(hostDocs.appendingPathComponent("Inbox", isDirectory: true))
+    }
+    var found: [URL] = []
+    var seenPaths = Set<String>()
+    for dir in searchDirs {
+      guard let items = try? fm.contentsOfDirectory(
+        at: dir,
+        includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
         options: [.skipsHiddenFiles]
-      ) {
-        for case let fileURL as URL in enumerator {
-          var itemURL = fileURL
-          try? itemURL.setResourceValues(rv)
+      ) else { continue }
+      for item in items {
+        let ext = item.pathExtension.lowercased()
+        guard ext == "exe" || ext == "zip" else { continue }
+        guard let vals = try? item.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              vals.isRegularFile == true,
+              (vals.fileSize ?? 0) > 10 * 1024 * 1024 else { continue }
+        if seenPaths.insert(item.path).inserted {
+          found.append(item)
+        }
+      }
+    }
+    return found
+  }
+
+  /// Migrates already-extracted game resources from a previous LiveContainer guest container
+  /// if the current container has no active resources, and cleans up orphaned duplicate containers
+  /// that otherwise accumulate 45,000+ files in LiveContainer Documents and freeze iOS fileproviderd.
+  static func migrateAndCleanupSiblingContainers() {
+    let fm = FileManager.default
+    guard let currentDocs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+    let currentLoader = currentDocs.appendingPathComponent("GardendlessLoader", isDirectory: true)
+    excludeFromBackupTopLevel(url: currentLoader)
+
+    // Clean up any leftover temp copies in current container tmp/
+    let currentTmp = FileManager.default.temporaryDirectory
+    if let tmpItems = try? fm.contentsOfDirectory(at: currentTmp, includingPropertiesForKeys: nil) {
+      for item in tmpItems {
+        try? fm.removeItem(at: item)
+      }
+    }
+
+    let currentContainer = currentDocs.deletingLastPathComponent()
+    let applicationsDir = currentContainer.deletingLastPathComponent()
+    guard applicationsDir.lastPathComponent == "Application" else { return }
+    excludeFromBackupTopLevel(url: applicationsDir)
+    excludeFromBackupTopLevel(url: applicationsDir.deletingLastPathComponent())
+
+    func hasExtractedGame(_ loaderDir: URL) -> Bool {
+      let slotAIndex = loaderDir.appendingPathComponent("slot-a/index.html").path
+      let slotBIndex = loaderDir.appendingPathComponent("slot-b/index.html").path
+      let manifest = loaderDir.appendingPathComponent("manifest.json").path
+      return fm.fileExists(atPath: manifest) && (fm.fileExists(atPath: slotAIndex) || fm.fileExists(atPath: slotBIndex))
+    }
+
+    let currentHasGame = hasExtractedGame(currentLoader)
+    guard let siblingContainers = try? fm.contentsOfDirectory(
+      at: applicationsDir,
+      includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+      options: [.skipsHiddenFiles]
+    ) else { return }
+
+    var validSiblings: [(loaderURL: URL, tmpURL: URL, modDate: Date)] = []
+    var obsoleteDirs: [URL] = []
+
+    for containerURL in siblingContainers where containerURL.lastPathComponent != currentContainer.lastPathComponent {
+      let siblingLoader = containerURL.appendingPathComponent("Documents/GardendlessLoader", isDirectory: true)
+      let siblingTmp = containerURL.appendingPathComponent("tmp", isDirectory: true)
+      if hasExtractedGame(siblingLoader) {
+        let modDate = (try? siblingLoader.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        validSiblings.append((siblingLoader, siblingTmp, modDate))
+      } else {
+        if fm.fileExists(atPath: siblingLoader.path) {
+          obsoleteDirs.append(siblingLoader)
+        }
+        if fm.fileExists(atPath: siblingTmp.path) {
+          obsoleteDirs.append(siblingTmp)
+        }
+      }
+    }
+
+    validSiblings.sort { $0.modDate > $1.modDate }
+
+    var remainingSiblings = validSiblings
+    if !currentHasGame, let newest = validSiblings.first {
+      do {
+        if fm.fileExists(atPath: currentLoader.path) {
+          try fm.removeItem(at: currentLoader)
+        }
+        try fm.moveItem(at: newest.loaderURL, to: currentLoader)
+        excludeFromBackupTopLevel(url: currentLoader)
+        obsoleteDirs.append(newest.tmpURL)
+        remainingSiblings.removeFirst()
+      } catch {
+        // Fallback to manual import if move fails
+      }
+    }
+
+    for item in remainingSiblings {
+      obsoleteDirs.append(item.loaderURL)
+      obsoleteDirs.append(item.tmpURL)
+    }
+
+    if !obsoleteDirs.isEmpty {
+      DispatchQueue.global(qos: .background).async {
+        for dir in obsoleteDirs {
+          try? FileManager.default.removeItem(at: dir)
         }
       }
     }
@@ -739,7 +896,7 @@ import UIKit
        FileManager.default.fileExists(atPath: settingsSrc.path) {
       try? FileManager.default.copyItem(at: settingsSrc, to: directSettingsDst)
     }
-    Self.excludeFromBackupRecursively(url: targetDirURL)
+    Self.excludeFromBackupTopLevel(url: targetDirURL)
   }
 
   /// Flutter error code naming the failure cause; it selects the launcher's fix hint.
