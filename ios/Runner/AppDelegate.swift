@@ -485,9 +485,18 @@ import UIKit
         )
         return
       }
-      // Allow picking both standard .zip archives and Windows Tauri .exe binaries.
+      // Allow picking only standard .zip archives and Windows Tauri .exe binaries.
+      // Crucial: do NOT include UTType.data or UTType.item, as those force iOS Files app
+      // to crawl and index all 8,900+ extracted game assets inside Documents, freezing CPU.
+      let exeType = UTType("com.microsoft.windows-executable")
+        ?? UTType(filenameExtension: "exe")
+        ?? UTType(tag: "exe", tagClass: .filenameExtension, conformingTo: .data)
+      var contentTypes: [UTType] = [UTType.zip]
+      if let exeType {
+        contentTypes.append(exeType)
+      }
       let picker = UIDocumentPickerViewController(
-        forOpeningContentTypes: [UTType.zip, UTType.exe, UTType.data, UTType.item],
+        forOpeningContentTypes: contentTypes,
         asCopy: true
       )
       picker.delegate = self

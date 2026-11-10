@@ -444,7 +444,7 @@ final class GameHostController: UIViewController,
     }
     pendingGpNextImportId = id
     let picker = UIDocumentPickerViewController(
-      forOpeningContentTypes: [.zip, .json, .plainText, .data],
+      forOpeningContentTypes: [.zip, .json, .plainText],
       asCopy: true
     )
     activePicker = picker

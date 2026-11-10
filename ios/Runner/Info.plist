@@ -86,5 +86,31 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.microsoft.windows-executable</string>
+			<key>UTTypeDescription</key>
+			<string>Windows Executable</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>exe</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/x-msdownload</string>
+					<string>application/exe</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>
