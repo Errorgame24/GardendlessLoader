@@ -19,8 +19,6 @@
 			<array>
 				<string>public.zip-archive</string>
 				<string>com.microsoft.windows-executable</string>
-				<string>public.executable</string>
-				<string>public.data</string>
 			</array>
 		</dict>
 	</array>

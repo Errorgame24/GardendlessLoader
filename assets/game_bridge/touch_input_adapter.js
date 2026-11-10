@@ -557,7 +557,11 @@
     }
 
     const target = eventTarget(event);
-    if (event.touches.length === 1 && isNativeTouchTarget(target)) {
+    const touch = firstChangedTouch(event);
+    const w = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 1280;
+    const h = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 720;
+    const isWatermarkCorner = touch && touch.clientX >= w - 240 && touch.clientY >= h - 70;
+    if (event.touches.length === 1 && (isNativeTouchTarget(target) || isWatermarkCorner)) {
       owner = "native";
       resetBackdropCandidate();
       recordTrace({event: "touch_owner", owner: owner});

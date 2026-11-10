@@ -48,6 +48,12 @@ import UIKit
       didFinishLaunchingWithOptions: launchOptions
     )
     logStore.initialize()
+    DispatchQueue.global(qos: .utility).async {
+      if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        let loaderDir = docs.appendingPathComponent("GardendlessLoader")
+        Self.excludeFromBackupRecursively(url: loaderDir)
+      }
+    }
     return launched
   }
 
@@ -497,11 +503,16 @@ import UIKit
       }
       let picker = UIDocumentPickerViewController(
         forOpeningContentTypes: contentTypes,
-        asCopy: true
+        asCopy: false
       )
       picker.delegate = self
       picker.allowsMultipleSelection = false
       picker.modalPresentationStyle = .formSheet
+      if #available(iOS 14.0, *) {
+        if let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+          picker.directoryURL = downloads
+        }
+      }
       self.zipImportInProgress = true
       self.pendingImportResult = result
       self.pendingImportTargetDirectory = targetDirectory
@@ -551,6 +562,8 @@ import UIKit
             self?.reportImportProgress(progress)
           }
         }
+        let targetURL = URL(fileURLWithPath: targetDirectory, isDirectory: true)
+        Self.excludeFromBackupRecursively(url: targetURL)
         DispatchQueue.main.async {
           self.zipImportInProgress = false
           result(targetDirectory)
@@ -565,6 +578,28 @@ import UIKit
               details: nil
             )
           )
+        }
+      }
+    }
+  }
+
+  /// Excludes large extracted asset directories from iCloud backup and fileprovider indexing
+  static func excludeFromBackupRecursively(url: URL) {
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+    var rootURL = url
+    var rv = URLResourceValues()
+    rv.isExcludedFromBackup = true
+    try? rootURL.setResourceValues(rv)
+    if isDir.boolValue {
+      if let enumerator = FileManager.default.enumerator(
+        at: url,
+        includingPropertiesForKeys: [.isDirectoryKey],
+        options: [.skipsHiddenFiles]
+      ) {
+        for case let fileURL as URL in enumerator {
+          var itemURL = fileURL
+          try? itemURL.setResourceValues(rv)
         }
       }
     }
@@ -704,6 +739,7 @@ import UIKit
        FileManager.default.fileExists(atPath: settingsSrc.path) {
       try? FileManager.default.copyItem(at: settingsSrc, to: directSettingsDst)
     }
+    Self.excludeFromBackupRecursively(url: targetDirURL)
   }
 
   /// Flutter error code naming the failure cause; it selects the launcher's fix hint.
