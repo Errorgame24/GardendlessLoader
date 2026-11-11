@@ -9,7 +9,7 @@ public final class FileTaskCoordinator {
   public static let chunkBytes = 64 * 1024
   public static let maximumBytes = 512 * 1024 * 1024
   public static let maximumHandles = 8
-  private static let maximumQueuedOperations = 16
+  private static let maximumQueuedOperations = 4096
   private static let maximumFinishedHandles = 128
   private static let handleLifetime: TimeInterval = 10 * 60
 

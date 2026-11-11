@@ -10,10 +10,14 @@
     ? native.postMessage.bind(native) : null;
   const pending = new Map();
   const fileQueue = [];
+  const tauriFileQueue = [];
+  const tauriRpcQueue = [];
   const chunkBytes = 64 * 1024;
   const maxFileBytes = 512 * 1024 * 1024;
   let nextId = 1;
   let fileBusy = false;
+  let tauriFileBusy = false;
+  let tauriRpcActive = 0;
   let destroyed = false;
 
   function failure(code, message) {
@@ -81,6 +85,8 @@
     }
     pending.clear();
     for (const operation of fileQueue.splice(0)) operation.reject(error);
+    for (const operation of tauriFileQueue.splice(0)) operation.reject(error);
+    for (const operation of tauriRpcQueue.splice(0)) operation.reject(error);
   }
 
   function runFiles() {
@@ -99,6 +105,47 @@
     return new Promise(function (resolve, reject) {
       fileQueue.push({run: run, resolve: resolve, reject: reject});
       runFiles();
+    });
+  }
+
+  function runTauriFiles() {
+    if (tauriFileBusy || destroyed || !tauriFileQueue.length) return;
+    tauriFileBusy = true;
+    const operation = tauriFileQueue.shift();
+    Promise.resolve().then(function () {
+      return fileOperation(operation.run);
+    }).then(operation.resolve, operation.reject).finally(function () {
+      tauriFileBusy = false;
+      runTauriFiles();
+    });
+  }
+
+  function tauriFileOperation(run) {
+    if (destroyed) return Promise.reject(failure("host_destroyed", "Game host was destroyed"));
+    if (tauriFileQueue.length >= 16384) return Promise.reject(failure("resource_limit_exceeded", "Tauri file queue is full"));
+    return new Promise(function (resolve, reject) {
+      tauriFileQueue.push({run: run, resolve: resolve, reject: reject});
+      runTauriFiles();
+    });
+  }
+
+  function runTauriRpcs() {
+    while (tauriRpcActive < 8 && !destroyed && tauriRpcQueue.length > 0) {
+      tauriRpcActive++;
+      const operation = tauriRpcQueue.shift();
+      Promise.resolve().then(operation.run).then(operation.resolve, operation.reject).finally(function () {
+        tauriRpcActive--;
+        runTauriRpcs();
+      });
+    }
+  }
+
+  function tauriRpcOperation(run) {
+    if (destroyed) return Promise.reject(failure("host_destroyed", "Game host was destroyed"));
+    if (tauriRpcQueue.length >= 16384) return Promise.reject(failure("resource_limit_exceeded", "Tauri RPC queue is full"));
+    return new Promise(function (resolve, reject) {
+      tauriRpcQueue.push({run: run, resolve: resolve, reject: reject});
+      runTauriRpcs();
     });
   }
 
@@ -153,6 +200,12 @@
   function binaryView(value) {
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    if (typeof value === "string") return new TextEncoder().encode(value);
+    if (Array.isArray(value)) return new Uint8Array(value);
+    if (value && typeof value === "object") {
+      if (value.contents !== undefined) return binaryView(value.contents);
+      if (value.data !== undefined) return binaryView(value.data);
+    }
     throw new TypeError("File write requires an ArrayBuffer, a byte view or a Blob");
   }
 
@@ -198,219 +251,43 @@
     return {destination: "gp-next", path: args && args.path, options: nested};
   }
 
-  function wrapArrayBufferString(buf) {
-    if (!(buf instanceof ArrayBuffer)) return buf;
-    let decoded = null;
-    function str() {
-      if (decoded === null) decoded = new TextDecoder("utf-8").decode(buf);
-      return decoded;
-    }
-    buf.toString = str;
-    buf.valueOf = str;
-    const stringMethods = ["trim", "trimStart", "trimEnd", "startsWith", "endsWith",
-      "indexOf", "lastIndexOf", "includes", "split", "replace", "replaceAll",
-      "match", "matchAll", "substring", "substr", "charAt", "charCodeAt"];
-    for (const m of stringMethods) {
-      if (typeof buf[m] === "undefined") {
-        Object.defineProperty(buf, m, {
-          configurable: true,
-          writable: true,
-          value: function () {
-            const s = str();
-            return s[m].apply(s, arguments);
-          }
-        });
-      }
-    }
-    return buf;
-  }
-
-  async function fallbackReadStaticAsset(rawPath, asText) {
-    if (typeof rawPath !== "string" || !rawPath) throw new Error("Empty path");
-    const clean = rawPath.replace(/\\/g, "/").replace(/^\/+/, "");
-    const base = clean.replace(/^.*[\\\/]/, "");
-    const candidates = [
-      clean,
-      clean.startsWith("assets/") ? clean.slice(7) : "assets/" + clean,
-      "assets/data/" + base,
-      "data/" + base,
-      "assets/resources/data/" + base,
-      "resources/data/" + base
-    ];
-    if (!clean.endsWith(".json")) {
-      candidates.push(clean + ".json");
-      candidates.push("assets/" + clean + ".json");
-      candidates.push("assets/data/" + base + ".json");
-      candidates.push("data/" + base + ".json");
-      candidates.push("assets/resources/data/" + base + ".json");
-      candidates.push("resources/data/" + base + ".json");
-    }
-    const unique = Array.from(new Set(candidates));
-    for (const path of unique) {
-      try {
-        const resp = await fetch(path);
-        if (resp && resp.ok) {
-          const buf = await resp.arrayBuffer();
-          return asText ? wrapArrayBufferString(buf) : buf;
-        }
-      } catch (_) {}
-    }
-    throw new Error("Static asset not found: " + rawPath);
-  }
-
   async function tauriInvoke(command, args, options) {
     command = String(command || "");
     args = args == null ? {} : args;
     options = options || {};
     if (command === "plugin:path|resolve_directory") {
-      if (args.directory === 14) return String(config.gpNextBaseDirectory || "");
-      if (args.directory === 13) return String(config.origin || "gardendless-game://localhost");
+      if (args.directory !== 14) throw new Error("Only AppData directory 14 is supported");
       return String(config.gpNextBaseDirectory || "");
     }
     // No native events exist; the handler's callback id doubles as the event id,
     // so unregisterListener(event, id) removes that same handler.
     if (command === "plugin:event|listen") return args.handler;
     if (command === "plugin:drpc|is_running" || command === "plugin:deep-link|is_registered" || command === "plugin:window|is_maximized") return false;
-    if (command === "plugin:window|is_fullscreen") return true;
     if (command === "plugin:deep-link|get_current") return [];
     // The loader has no GP-Next cloud save service, so no restore journal exists.
     if (command === "cloud_journal_read") return null;
     // The game's quit button closes the Tauri window; on mobile that means returning to the launcher.
     if (command === "plugin:window|close") return invoke("host:returnHome");
     if (disabled.has(command)) return null;
-    if (command === "plugin:window|scale_factor") return window.devicePixelRatio || 1;
-    if (command === "plugin:window|inner_size" || command === "plugin:window|outer_size") {
-      return { width: window.innerWidth || 1280, height: window.innerHeight || 720 };
-    }
-    if (command === "plugin:window|inner_position" || command === "plugin:window|outer_position") {
-      return { x: 0, y: 0 };
-    }
-    if (command === "plugin:window|is_visible" || command === "plugin:window|is_focused" ||
-        command === "plugin:window|is_enabled" || command === "plugin:window|is_decorated") return true;
-    if (command === "plugin:window|is_minimized") return false;
-    if (command === "plugin:window|theme") return "dark";
-    if (command.startsWith("plugin:window|")) return null;
-    if (command.startsWith("plugin:image|")) return null;
-    if (command.startsWith("plugin:clipboard|")) return null;
-    if (command.startsWith("plugin:notification|")) return null;
-    if (command === "plugin:os|platform") return "ios";
-    if (command === "plugin:os|type") return "Darwin";
-    if (command === "plugin:os|arch") return "arm64";
-    if (command === "plugin:os|version") return "1.0.0";
-    if (command === "gp_next_install_pack" || command === "gp_next_uninstall_pack" ||
-        command === "gp_next_reload_packs" || command === "gp_next_enable_pack" ||
-        command === "gp_next_disable_pack") {
-      return null;
-    }
-    if (command === "gp_next_list_packs" || command === "gp_next_get_packs") {
-      return [];
-    }
-    if (command.startsWith("gp_next_")) {
-      return null;
-    }
+    if (command.startsWith("plugin:window|") || command.startsWith("plugin:image|")) throw new Error("Unsupported mobile command: " + command);
     if (command === "plugin:fs|read_file" || command === "plugin:fs|read_text_file") {
-      const isText = command === "plugin:fs|read_text_file";
       const spec = fileSpec(args, options);
-      const baseDir = (args && args.options && args.options.baseDir) ||
-                      (options && options.baseDir) ||
-                      (spec.options && spec.options.baseDir);
-      const isResource = baseDir === 13;
-      const rawPath = typeof spec.path === "string" ? spec.path : "";
-      const isAppData = baseDir === 14 || rawPath.startsWith("gp-next/");
-      if (isResource) {
-        return fallbackReadStaticAsset(spec.path, isText);
-      }
-      return fileOperation(function () { return readFile(spec); })
-        .then(function (buf) {
-          return isText ? wrapArrayBufferString(buf) : buf;
-        })
-        .catch(function (nativeErr) {
-          if (isAppData) throw nativeErr;
-          return fallbackReadStaticAsset(spec.path, isText).catch(function () {
-            throw nativeErr;
-          });
-        });
+      return tauriFileOperation(function () { return readFile(spec); });
     }
     if (command === "plugin:fs|write_file" || command === "plugin:fs|write_text_file") {
       const spec = fileSpec(args, options);
-      return fileOperation(function () { return writeFile(args, spec); });
+      return tauriFileOperation(function () { return writeFile(args, spec); });
     }
-    if (command === "plugin:fs|exists") {
-      const baseDir = (args && args.options && args.options.baseDir) || (options && options.baseDir);
-      const isResource = baseDir === 13;
-      const rawPath = typeof args.path === "string" ? args.path : "";
-      const isAppData = baseDir === 14 || rawPath.startsWith("gp-next/");
-      if (isResource) {
-        return fallbackReadStaticAsset(args.path, false).then(function () {
-          return true;
-        }).catch(function () {
-          return false;
-        });
-      }
-      if (args.path === "patches" && args.options && args.options.baseDir === 14) {
-        args = Object.assign({}, args, {path: "gp-next/patches"});
-      }
-      return invoke(command, {namespace: "gp-next", args: args, options: options}).then(function (res) {
-        if (res === true) return true;
-        if (isAppData) return false;
-        return fallbackReadStaticAsset(args.path, false).then(function () {
-          return true;
-        }).catch(function () {
-          return false;
-        });
-      }).catch(function () {
-        if (isAppData) return false;
-        return fallbackReadStaticAsset(args.path, false).then(function () {
-          return true;
-        }).catch(function () {
-          return false;
-        });
-      });
+    if (command === "plugin:fs|exists" && args.path === "patches" && args.options && args.options.baseDir === 14) {
+      args = Object.assign({}, args, {path: "gp-next/patches"});
     }
-    if (command === "plugin:fs|stat" || command === "plugin:fs|lstat") {
-      const baseDir = (args && args.options && args.options.baseDir) || (options && options.baseDir);
-      const isResource = baseDir === 13;
-      const rawPath = typeof args.path === "string" ? args.path : "";
-      const isAppData = baseDir === 14 || rawPath.startsWith("gp-next/");
-      if (isResource) {
-        return fallbackReadStaticAsset(args.path, false).then(function (buf) {
-          const size = buf.byteLength || 0;
-          return {
-            isFile: true,
-            isDirectory: false,
-            isSymlink: false,
-            size: size,
-            mtime: Date.now(),
-            atime: null,
-            birthtime: null,
-            readonly: true,
-            fileAttributes: null,
-            dev: 0, ino: 0, mode: 0, nlink: 0, uid: 0, gid: 0, rdev: 0, blksize: 0, blocks: 0
-          };
-        });
-      }
-      return invoke(command, {namespace: "gp-next", args: args, options: options}).catch(function (nativeErr) {
-        if (isAppData) throw nativeErr;
-        return fallbackReadStaticAsset(args.path, false).then(function (buf) {
-          const size = buf.byteLength || 0;
-          return {
-            isFile: true,
-            isDirectory: false,
-            isSymlink: false,
-            size: size,
-            mtime: Date.now(),
-            atime: null,
-            birthtime: null,
-            readonly: true,
-            fileAttributes: null,
-            dev: 0, ino: 0, mode: 0, nlink: 0, uid: 0, gid: 0, rdev: 0, blksize: 0, blocks: 0
-          };
-        }).catch(function () {
-          throw nativeErr;
-        });
-      });
+    const waitsForUser = command === "plugin:dialog|open" || command === "plugin:opener|open_path";
+    if (waitsForUser) {
+      return invoke(command, {namespace: "gp-next", args: args, options: options});
     }
-    return invoke(command, {namespace: "gp-next", args: args, options: options});
+    return tauriRpcOperation(function () {
+      return invoke(command, {namespace: "gp-next", args: args, options: options});
+    });
   }
 
   // Tauri v2 marks its runtime with isTauri; GP-Next installs window.electron, the game's quit path, only when it is set.

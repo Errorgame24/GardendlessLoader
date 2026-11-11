@@ -169,6 +169,15 @@ public final class GpNextFileSystem {
     )
     // Tauri's rename is std::fs::rename: an existing destination file is
     // replaced atomically, which GP-Next relies on for `.pending` commits.
+    // Also support replacing an existing directory when committing a directory snapshot.
+    var srcIsDir: ObjCBool = false
+    var dstIsDir: ObjCBool = false
+    if FileManager.default.fileExists(atPath: source.path, isDirectory: &srcIsDir),
+       srcIsDir.boolValue,
+       FileManager.default.fileExists(atPath: destination.path, isDirectory: &dstIsDir),
+       dstIsDir.boolValue {
+      try? FileManager.default.removeItem(at: destination)
+    }
     guard Darwin.rename(source.path, destination.path) == 0 else {
       throw GameError.failed(
         .gpNextForbidden,

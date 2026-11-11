@@ -748,6 +748,15 @@ import UIKit
       }
     }
 
+    // One-time cleanup of any corrupted gp-next snapshot created before the transport queue fix
+    if !UserDefaults.standard.bool(forKey: "gardendless.cleanedCorruptedGpNextV3") {
+      UserDefaults.standard.set(true, forKey: "gardendless.cleanedCorruptedGpNextV3")
+      let gpNextDir = currentLoader.appendingPathComponent("gp-next", isDirectory: true)
+      if fm.fileExists(atPath: gpNextDir.path) {
+        try? fm.removeItem(at: gpNextDir)
+      }
+    }
+
     for item in remainingSiblings {
       obsoleteDirs.append(item.loaderURL)
       obsoleteDirs.append(item.tmpURL)
@@ -881,21 +890,7 @@ import UIKit
       force: true
     )
 
-    // Ensure gp-next support files exist in slot
     let targetDirURL = URL(fileURLWithPath: targetDirectory, isDirectory: true)
-    let gpNextDirURL = targetDirURL.appendingPathComponent("gp-next", isDirectory: true)
-    try? FileManager.default.createDirectory(at: gpNextDirURL, withIntermediateDirectories: true)
-    let settingsSrc = targetDirURL.appendingPathComponent("src/settings.json")
-    let settingsDst = gpNextDirURL.appendingPathComponent("settings.json")
-    if !FileManager.default.fileExists(atPath: settingsDst.path),
-       FileManager.default.fileExists(atPath: settingsSrc.path) {
-      try? FileManager.default.copyItem(at: settingsSrc, to: settingsDst)
-    }
-    let directSettingsDst = targetDirURL.appendingPathComponent("settings.json")
-    if !FileManager.default.fileExists(atPath: directSettingsDst.path),
-       FileManager.default.fileExists(atPath: settingsSrc.path) {
-      try? FileManager.default.copyItem(at: settingsSrc, to: directSettingsDst)
-    }
     Self.excludeFromBackupTopLevel(url: targetDirURL)
   }
 

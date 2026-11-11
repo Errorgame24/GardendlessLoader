@@ -36,15 +36,14 @@ public final class GpNextPathResolver {
         "GP-Next 路径超出 Loader 沙箱"
       )
     }
-
-    let subComponents: [String]
-    if let namespaceIndex = components.firstIndex(of: "gp-next") {
-      subComponents = Array(components[components.index(after: namespaceIndex)...])
-    } else {
-      subComponents = components
+    guard let namespaceIndex = components.firstIndex(of: "gp-next"),
+          raw.hasPrefix("/") || namespaceIndex == components.startIndex else {
+      throw GameError.failed(
+        .gpNextForbidden,
+        "GP-Next 路径超出 Loader 沙箱"
+      )
     }
-
-    let candidate = subComponents
+    let candidate = components[components.index(after: namespaceIndex)...]
       .reduce(gpNextRoot) { result, component in
         result.appendingPathComponent(component)
       }

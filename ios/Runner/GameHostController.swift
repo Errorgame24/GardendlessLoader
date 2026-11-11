@@ -444,7 +444,7 @@ final class GameHostController: UIViewController,
     }
     pendingGpNextImportId = id
     let picker = UIDocumentPickerViewController(
-      forOpeningContentTypes: [.zip, .json, .plainText],
+      forOpeningContentTypes: [.zip, .json, .plainText, .data],
       asCopy: true
     )
     activePicker = picker
@@ -470,7 +470,7 @@ final class GameHostController: UIViewController,
     // UIKit asserts when a folder is opened as a copy. A folder is opened in
     // place and staged under its security scope in documentPicker(_:didPickDocumentsAt:).
     let picker = UIDocumentPickerViewController(
-      forOpeningContentTypes: [directory ? .folder : .zip],
+      forOpeningContentTypes: directory ? [.folder] : [.zip, .archive, .data, .item],
       asCopy: !directory
     )
     activePicker = picker
